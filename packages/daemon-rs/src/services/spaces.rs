@@ -644,7 +644,7 @@ impl SpacesService {
 
         let mut index = existing.len() + 1;
         loop {
-            let candidate = format!("{}:{}", entrypoint.name, index);
+            let candidate = format!("{}_{}", entrypoint.name, index);
             if !existing.contains(&candidate) {
                 return Ok(candidate);
             }

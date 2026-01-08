@@ -400,7 +400,7 @@ export class SpacesService {
     const existingNames = new Set(existingLayers.map((layer) => layer.name));
     let index = existingLayers.length + 1;
     while (true) {
-      const candidate = `${entrypoint.name}:${index}`;
+      const candidate = `${entrypoint.name}_${index}`;
       if (!existingNames.has(candidate)) {
         return candidate;
       }
