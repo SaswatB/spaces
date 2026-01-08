@@ -6,7 +6,6 @@ import {
 } from '@tanstack/react-router';
 import { useState } from 'react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { trpc, createTRPCClient } from '../lib/trpc';
 
 export const Route = createRootRoute({
   head: () => ({
@@ -27,16 +26,13 @@ export const Route = createRootRoute({
 
 function RootComponent() {
   const [queryClient] = useState(() => new QueryClient());
-  const [trpcClient] = useState(() => createTRPCClient());
 
   return (
-    <trpc.Provider client={trpcClient} queryClient={queryClient}>
-      <QueryClientProvider client={queryClient}>
-        <RootDocument>
-          <Outlet />
-        </RootDocument>
-      </QueryClientProvider>
-    </trpc.Provider>
+    <QueryClientProvider client={queryClient}>
+      <RootDocument>
+        <Outlet />
+      </RootDocument>
+    </QueryClientProvider>
   );
 }
 

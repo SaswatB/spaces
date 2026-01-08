@@ -8,7 +8,9 @@
     "dev:daemon": "pnpm --filter @spaces/daemon dev",
     "dev:web": "pnpm --filter @spaces/web dev",
     "build": "pnpm -r build",
-    "typecheck": "pnpm -r typecheck"
+    "typecheck": "pnpm -r typecheck",
+    "openapi:generate": "cargo run --manifest-path packages/daemon-rs/Cargo.toml --bin openapi > packages/web/app/lib/openapi.json && pnpm --filter @spaces/web exec openapi-typescript ./app/lib/openapi.json --output ./app/lib/openapi-types.ts",
+    "cli": "pnpm --filter @spaces/web cli"
   },
   "devDependencies": {
     "typescript": "^5.7.2"

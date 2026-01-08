@@ -1,6 +1,7 @@
 import { createFileRoute, useSearch } from '@tanstack/react-router';
 import { useState } from 'react';
-import { trpc } from '../lib/trpc';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { api } from '../lib/api';
 
 // @ts-expect-error - Route types are generated at build time
 export const Route = createFileRoute('/layers')({
@@ -13,10 +14,14 @@ export const Route = createFileRoute('/layers')({
 function LayersPage() {
   // @ts-expect-error - Route types are generated at build time
   const { entrypointId } = useSearch({ from: '/layers' });
-  const { data: layers, isLoading } = trpc.layers.list.useQuery(
-    entrypointId ? { entrypointId } : undefined
-  );
-  const { data: entrypoints } = trpc.entrypoints.list.useQuery();
+  const { data: layers, isLoading } = useQuery({
+    queryKey: ['layers', 'list', entrypointId],
+    queryFn: () => api.layers.list(entrypointId),
+  });
+  const { data: entrypoints } = useQuery({
+    queryKey: ['entrypoints', 'list'],
+    queryFn: () => api.entrypoints.list(),
+  });
   const [showCreate, setShowCreate] = useState(false);
 
   const selectedEntrypoint = entrypoints?.find((e) => e.id === entrypointId);
@@ -92,11 +97,13 @@ function CreateLayerForm({
   defaultEntrypointId?: string;
   onClose: () => void;
 }) {
-  const utils = trpc.useUtils();
-  const create = trpc.layers.create.useMutation({
+  const queryClient = useQueryClient();
+  const create = useMutation({
+    mutationFn: (payload: { name: string; entrypointId: string; parentId: string | null }) =>
+      api.layers.create(payload),
     onSuccess: () => {
-      utils.layers.list.invalidate();
-      utils.system.status.invalidate();
+      queryClient.invalidateQueries({ queryKey: ['layers', 'list'] });
+      queryClient.invalidateQueries({ queryKey: ['system', 'status'] });
       onClose();
     },
   });
@@ -238,22 +245,22 @@ function LayerTreeLevel({
 }
 
 function LayerCard({ layer }: { layer: LayerWithStatus }) {
-  const utils = trpc.useUtils();
-
-  const mountLayer = trpc.layers.mount.useMutation({
-    onSuccess: () => utils.layers.list.invalidate(),
+  const queryClient = useQueryClient();
+  const mountLayer = useMutation({
+    mutationFn: (payload: { id: string }) => api.layers.mount(payload.id),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['layers', 'list'] }),
   });
 
-  const unmountLayer = trpc.layers.unmount.useMutation({
-    onSuccess: () => utils.layers.list.invalidate(),
+  const unmountLayer = useMutation({
+    mutationFn: (payload: { id: string }) => api.layers.unmount(payload.id),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['layers', 'list'] }),
   });
 
-  const openTerminal = trpc.layers.openTerminal.useMutation();
-
-  const deleteLayer = trpc.layers.delete.useMutation({
+  const deleteLayer = useMutation({
+    mutationFn: (payload: { id: string }) => api.layers.delete(payload.id),
     onSuccess: () => {
-      utils.layers.list.invalidate();
-      utils.system.status.invalidate();
+      queryClient.invalidateQueries({ queryKey: ['layers', 'list'] });
+      queryClient.invalidateQueries({ queryKey: ['system', 'status'] });
     },
   });
 
@@ -280,13 +287,6 @@ function LayerCard({ layer }: { layer: LayerWithStatus }) {
         <div className="button-group">
           {isMounted ? (
             <>
-              <button
-                className="outline button-small"
-                onClick={() => openTerminal.mutate({ id: layer.id })}
-                disabled={openTerminal.isPending}
-              >
-                Terminal
-              </button>
               <button
                 className="outline button-small"
                 onClick={() => unmountLayer.mutate({ id: layer.id })}

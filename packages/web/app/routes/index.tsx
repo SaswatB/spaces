@@ -1,5 +1,6 @@
 import { createFileRoute } from '@tanstack/react-router';
-import { trpc } from '../lib/trpc';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { api } from '../lib/api';
 
 // @ts-expect-error - Route types are generated at build time
 export const Route = createFileRoute('/')({
@@ -7,7 +8,10 @@ export const Route = createFileRoute('/')({
 });
 
 function Dashboard() {
-  const { data: status, isLoading, error } = trpc.system.status.useQuery();
+  const { data: status, isLoading, error } = useQuery({
+    queryKey: ['system', 'status'],
+    queryFn: () => api.system.status(),
+  });
 
   if (isLoading) {
     return <div aria-busy="true">Loading...</div>;
@@ -86,12 +90,13 @@ function Dashboard() {
 }
 
 function RemountAllButton() {
-  const utils = trpc.useUtils();
-  const remountAll = trpc.system.remountAll.useMutation({
+  const queryClient = useQueryClient();
+  const remountAll = useMutation({
+    mutationFn: () => api.system.remount(),
     onSuccess: () => {
-      utils.system.status.invalidate();
-      utils.layers.list.invalidate();
-      utils.userMounts.list.invalidate();
+      queryClient.invalidateQueries({ queryKey: ['system', 'status'] });
+      queryClient.invalidateQueries({ queryKey: ['layers', 'list'] });
+      queryClient.invalidateQueries({ queryKey: ['user-mounts', 'list'] });
     },
   });
 

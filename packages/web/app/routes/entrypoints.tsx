@@ -1,6 +1,7 @@
 import { createFileRoute } from '@tanstack/react-router';
 import { useState } from 'react';
-import { trpc } from '../lib/trpc';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { api } from '../lib/api';
 
 // @ts-expect-error - Route types are generated at build time
 export const Route = createFileRoute('/entrypoints')({
@@ -8,7 +9,10 @@ export const Route = createFileRoute('/entrypoints')({
 });
 
 function EntrypointsPage() {
-  const { data: entrypoints, isLoading } = trpc.entrypoints.list.useQuery();
+  const { data: entrypoints, isLoading } = useQuery({
+    queryKey: ['entrypoints', 'list'],
+    queryFn: () => api.entrypoints.list(),
+  });
   const [showCreate, setShowCreate] = useState(false);
 
   return (
@@ -46,11 +50,13 @@ function EntrypointsPage() {
 }
 
 function CreateEntrypointForm({ onClose }: { onClose: () => void }) {
-  const utils = trpc.useUtils();
-  const create = trpc.entrypoints.create.useMutation({
+  const queryClient = useQueryClient();
+  const create = useMutation({
+    mutationFn: (payload: { name: string; path: string }) =>
+      api.entrypoints.create(payload),
     onSuccess: () => {
-      utils.entrypoints.list.invalidate();
-      utils.system.status.invalidate();
+      queryClient.invalidateQueries({ queryKey: ['entrypoints', 'list'] });
+      queryClient.invalidateQueries({ queryKey: ['system', 'status'] });
       onClose();
     },
   });
@@ -105,11 +111,12 @@ function CreateEntrypointForm({ onClose }: { onClose: () => void }) {
 
 // Use any for the entrypoint type since dates are serialized as strings over JSON
 function EntrypointCard({ entrypoint }: { entrypoint: { id: string; name: string; path: string } }) {
-  const utils = trpc.useUtils();
-  const deleteEntrypoint = trpc.entrypoints.delete.useMutation({
+  const queryClient = useQueryClient();
+  const deleteEntrypoint = useMutation({
+    mutationFn: (payload: { id: string }) => api.entrypoints.delete(payload.id),
     onSuccess: () => {
-      utils.entrypoints.list.invalidate();
-      utils.system.status.invalidate();
+      queryClient.invalidateQueries({ queryKey: ['entrypoints', 'list'] });
+      queryClient.invalidateQueries({ queryKey: ['system', 'status'] });
     },
   });
 

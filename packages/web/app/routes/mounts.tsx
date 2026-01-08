@@ -1,6 +1,7 @@
 import { createFileRoute } from '@tanstack/react-router';
 import { useState } from 'react';
-import { trpc } from '../lib/trpc';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { api } from '../lib/api';
 
 // @ts-expect-error - Route types are generated at build time
 export const Route = createFileRoute('/mounts')({
@@ -8,9 +9,18 @@ export const Route = createFileRoute('/mounts')({
 });
 
 function MountsPage() {
-  const { data: mounts, isLoading } = trpc.userMounts.list.useQuery();
-  const { data: entrypoints } = trpc.entrypoints.list.useQuery();
-  const { data: layers } = trpc.layers.list.useQuery();
+  const { data: mounts, isLoading } = useQuery({
+    queryKey: ['user-mounts', 'list'],
+    queryFn: () => api.userMounts.list(),
+  });
+  const { data: entrypoints } = useQuery({
+    queryKey: ['entrypoints', 'list'],
+    queryFn: () => api.entrypoints.list(),
+  });
+  const { data: layers } = useQuery({
+    queryKey: ['layers', 'list'],
+    queryFn: () => api.layers.list(),
+  });
   const [showCreate, setShowCreate] = useState(false);
 
   return (
@@ -95,11 +105,17 @@ function CreateUserMountForm({
   layers: LayerWithStatus[];
   onClose: () => void;
 }) {
-  const utils = trpc.useUtils();
-  const create = trpc.userMounts.create.useMutation({
+  const queryClient = useQueryClient();
+  const create = useMutation({
+    mutationFn: (payload: {
+      name: string;
+      entrypointId: string;
+      mountPath: string;
+      attachedLayerId: string | null;
+    }) => api.userMounts.create(payload),
     onSuccess: () => {
-      utils.userMounts.list.invalidate();
-      utils.system.status.invalidate();
+      queryClient.invalidateQueries({ queryKey: ['user-mounts', 'list'] });
+      queryClient.invalidateQueries({ queryKey: ['system', 'status'] });
       onClose();
     },
   });
@@ -202,26 +218,29 @@ function UserMountCard({
   mount: UserMountWithStatus;
   layers: LayerWithStatus[];
 }) {
-  const utils = trpc.useUtils();
+  const queryClient = useQueryClient();
 
-  const mountUserMount = trpc.userMounts.mount.useMutation({
-    onSuccess: () => utils.userMounts.list.invalidate(),
+  const mountUserMount = useMutation({
+    mutationFn: (payload: { id: string }) => api.userMounts.mount(payload.id),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['user-mounts', 'list'] }),
   });
 
-  const unmountUserMount = trpc.userMounts.unmount.useMutation({
-    onSuccess: () => utils.userMounts.list.invalidate(),
+  const unmountUserMount = useMutation({
+    mutationFn: (payload: { id: string }) => api.userMounts.unmount(payload.id),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['user-mounts', 'list'] }),
   });
 
-  const openTerminal = trpc.userMounts.openTerminal.useMutation();
-
-  const attachLayer = trpc.userMounts.attachLayer.useMutation({
-    onSuccess: () => utils.userMounts.list.invalidate(),
+  const attachLayer = useMutation({
+    mutationFn: (payload: { userMountId: string; layerId: string | null }) =>
+      api.userMounts.attachLayer(payload),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['user-mounts', 'list'] }),
   });
 
-  const deleteMount = trpc.userMounts.delete.useMutation({
+  const deleteMount = useMutation({
+    mutationFn: (payload: { id: string }) => api.userMounts.delete(payload.id),
     onSuccess: () => {
-      utils.userMounts.list.invalidate();
-      utils.system.status.invalidate();
+      queryClient.invalidateQueries({ queryKey: ['user-mounts', 'list'] });
+      queryClient.invalidateQueries({ queryKey: ['system', 'status'] });
     },
   });
 
@@ -257,13 +276,6 @@ function UserMountCard({
         <div className="button-group">
           {isMounted ? (
             <>
-              <button
-                className="outline button-small"
-                onClick={() => openTerminal.mutate({ id: mount.id })}
-                disabled={openTerminal.isPending}
-              >
-                Terminal
-              </button>
               <button
                 className="outline button-small"
                 onClick={() => unmountUserMount.mutate({ id: mount.id })}

@@ -7,14 +7,12 @@
     "dev": "vinxi dev",
     "build": "vinxi build",
     "start": "vinxi start",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "cli": "tsx bin/spaces.ts"
   },
   "dependencies": {
-    "@spaces/daemon": "workspace:*",
     "@tanstack/react-router": "^1.93.0",
     "@tanstack/start": "^1.93.0",
-    "@trpc/client": "^11.0.0-rc.682",
-    "@trpc/react-query": "^11.0.0-rc.682",
     "@tanstack/react-query": "^5.62.8",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
@@ -28,6 +26,8 @@
     "@types/react-dom": "^19.0.2",
     "@vitejs/plugin-react": "^4.3.4",
     "typescript": "^5.7.2",
-    "vite-tsconfig-paths": "^5.1.4"
+    "vite-tsconfig-paths": "^5.1.4",
+    "openapi-typescript": "^7.5.0",
+    "tsx": "^4.19.2"
   }
 }
