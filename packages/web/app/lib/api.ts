@@ -11,6 +11,7 @@ const DAEMON_TOKEN = typeof window !== 'undefined'
 
 type Entrypoint = components['schemas']['Entrypoint'];
 type LayerResponse = components['schemas']['LayerResponse'];
+type LayerDiffEntry = components['schemas']['LayerDiffEntry'];
 type UserMountResponse = components['schemas']['UserMountResponse'];
 type StatusResponse = components['schemas']['StatusResponse'];
 
@@ -63,7 +64,7 @@ export const api = {
   },
   entrypoints: {
     list: () => request<Entrypoint[]>('/entrypoints'),
-    create: (payload: { name: string; path: string }) =>
+    create: (payload: { name?: string; path: string }) =>
       request<Entrypoint>('/entrypoints', { method: 'POST', body: payload }),
     delete: (id: string) => request<void>(`/entrypoints/${id}`, { method: 'DELETE' }),
   },
@@ -71,14 +72,15 @@ export const api = {
     list: (entrypointId?: string) =>
       request<LayerResponse[]>('/layers', { query: { entrypointId } }),
     create: (payload: {
-      name: string;
+      name?: string;
       entrypointId: string;
-      parentId: string | null;
+      parentId?: string | null;
       mountPath?: string;
     }) => request<LayerResponse>('/layers', { method: 'POST', body: payload }),
     delete: (id: string) => request<void>(`/layers/${id}`, { method: 'DELETE' }),
     mount: (id: string) => request<void>(`/layers/${id}/mount`, { method: 'POST' }),
     unmount: (id: string) => request<void>(`/layers/${id}/unmount`, { method: 'POST' }),
+    diff: (id: string) => request<LayerDiffEntry[]>(`/layers/${id}/diff`),
   },
   userMounts: {
     list: (entrypointId?: string) =>

@@ -73,8 +73,7 @@
             "description": "Entrypoint ID",
             "required": true,
             "schema": {
-              "type": "string",
-              "format": "uuid"
+              "type": "string"
             }
           }
         ],
@@ -106,8 +105,7 @@
             "description": "Entrypoint ID",
             "required": true,
             "schema": {
-              "type": "string",
-              "format": "uuid"
+              "type": "string"
             }
           }
         ],
@@ -139,7 +137,6 @@
             "required": false,
             "schema": {
               "type": "string",
-              "format": "uuid",
               "nullable": true
             }
           }
@@ -202,8 +199,7 @@
             "description": "Layer ID",
             "required": true,
             "schema": {
-              "type": "string",
-              "format": "uuid"
+              "type": "string"
             }
           }
         ],
@@ -235,14 +231,47 @@
             "description": "Layer ID",
             "required": true,
             "schema": {
-              "type": "string",
-              "format": "uuid"
+              "type": "string"
             }
           }
         ],
         "responses": {
           "204": {
             "description": ""
+          }
+        }
+      }
+    },
+    "/layers/{id}/diff": {
+      "get": {
+        "tags": [
+          "layers"
+        ],
+        "operationId": "layer_diff",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Layer ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/LayerDiffEntry"
+                  }
+                }
+              }
+            }
           }
         }
       }
@@ -260,8 +289,7 @@
             "description": "Layer ID",
             "required": true,
             "schema": {
-              "type": "string",
-              "format": "uuid"
+              "type": "string"
             }
           }
         ],
@@ -285,8 +313,7 @@
             "description": "Layer ID",
             "required": true,
             "schema": {
-              "type": "string",
-              "format": "uuid"
+              "type": "string"
             }
           }
         ],
@@ -343,7 +370,6 @@
             "required": false,
             "schema": {
               "type": "string",
-              "format": "uuid",
               "nullable": true
             }
           }
@@ -429,8 +455,7 @@
             "description": "User mount ID",
             "required": true,
             "schema": {
-              "type": "string",
-              "format": "uuid"
+              "type": "string"
             }
           }
         ],
@@ -462,8 +487,7 @@
             "description": "User mount ID",
             "required": true,
             "schema": {
-              "type": "string",
-              "format": "uuid"
+              "type": "string"
             }
           }
         ],
@@ -487,8 +511,7 @@
             "description": "User mount ID",
             "required": true,
             "schema": {
-              "type": "string",
-              "format": "uuid"
+              "type": "string"
             }
           }
         ],
@@ -512,8 +535,7 @@
             "description": "User mount ID",
             "required": true,
             "schema": {
-              "type": "string",
-              "format": "uuid"
+              "type": "string"
             }
           }
         ],
@@ -535,24 +557,22 @@
         "properties": {
           "layerId": {
             "type": "string",
-            "format": "uuid",
             "nullable": true
           },
           "userMountId": {
-            "type": "string",
-            "format": "uuid"
+            "type": "string"
           }
         }
       },
       "CreateEntrypointRequest": {
         "type": "object",
         "required": [
-          "name",
           "path"
         ],
         "properties": {
           "name": {
-            "type": "string"
+            "type": "string",
+            "nullable": true
           },
           "path": {
             "type": "string"
@@ -562,24 +582,22 @@
       "CreateLayerRequest": {
         "type": "object",
         "required": [
-          "name",
           "entrypointId"
         ],
         "properties": {
           "entrypointId": {
-            "type": "string",
-            "format": "uuid"
+            "type": "string"
           },
           "mountPath": {
             "type": "string",
             "nullable": true
           },
           "name": {
-            "type": "string"
+            "type": "string",
+            "nullable": true
           },
           "parentId": {
             "type": "string",
-            "format": "uuid",
             "nullable": true
           }
         }
@@ -594,12 +612,10 @@
         "properties": {
           "attachedLayerId": {
             "type": "string",
-            "format": "uuid",
             "nullable": true
           },
           "entrypointId": {
-            "type": "string",
-            "format": "uuid"
+            "type": "string"
           },
           "mountPath": {
             "type": "string"
@@ -624,8 +640,7 @@
             "format": "date-time"
           },
           "id": {
-            "type": "string",
-            "format": "uuid"
+            "type": "string"
           },
           "name": {
             "type": "string"
@@ -708,12 +723,10 @@
             "format": "date-time"
           },
           "entrypointId": {
-            "type": "string",
-            "format": "uuid"
+            "type": "string"
           },
           "id": {
-            "type": "string",
-            "format": "uuid"
+            "type": "string"
           },
           "mountPath": {
             "type": "string"
@@ -723,7 +736,6 @@
           },
           "parentId": {
             "type": "string",
-            "format": "uuid",
             "nullable": true
           },
           "updatedAt": {
@@ -737,6 +749,29 @@
             "type": "string"
           }
         }
+      },
+      "LayerDiffEntry": {
+        "type": "object",
+        "required": [
+          "path",
+          "changeType"
+        ],
+        "properties": {
+          "changeType": {
+            "$ref": "#/components/schemas/LayerDiffType"
+          },
+          "path": {
+            "type": "string"
+          }
+        }
+      },
+      "LayerDiffType": {
+        "type": "string",
+        "enum": [
+          "add",
+          "modify",
+          "delete"
+        ]
       },
       "LayerResponse": {
         "type": "object",
@@ -757,12 +792,10 @@
             "format": "date-time"
           },
           "entrypointId": {
-            "type": "string",
-            "format": "uuid"
+            "type": "string"
           },
           "id": {
-            "type": "string",
-            "format": "uuid"
+            "type": "string"
           },
           "mountPath": {
             "type": "string"
@@ -775,7 +808,6 @@
           },
           "parentId": {
             "type": "string",
-            "format": "uuid",
             "nullable": true
           },
           "updatedAt": {
@@ -795,7 +827,6 @@
         "properties": {
           "entrypointId": {
             "type": "string",
-            "format": "uuid",
             "nullable": true
           }
         }
@@ -867,8 +898,7 @@
             "$ref": "#/components/schemas/SyncStatus"
           },
           "userMountId": {
-            "type": "string",
-            "format": "uuid"
+            "type": "string"
           }
         }
       },
@@ -895,7 +925,6 @@
         "properties": {
           "attachedLayerId": {
             "type": "string",
-            "format": "uuid",
             "nullable": true
           },
           "createdAt": {
@@ -903,12 +932,10 @@
             "format": "date-time"
           },
           "entrypointId": {
-            "type": "string",
-            "format": "uuid"
+            "type": "string"
           },
           "id": {
-            "type": "string",
-            "format": "uuid"
+            "type": "string"
           },
           "mountPath": {
             "type": "string"
@@ -944,7 +971,6 @@
         "properties": {
           "attachedLayerId": {
             "type": "string",
-            "format": "uuid",
             "nullable": true
           },
           "createdAt": {
@@ -952,12 +978,10 @@
             "format": "date-time"
           },
           "entrypointId": {
-            "type": "string",
-            "format": "uuid"
+            "type": "string"
           },
           "id": {
-            "type": "string",
-            "format": "uuid"
+            "type": "string"
           },
           "mountPath": {
             "type": "string"

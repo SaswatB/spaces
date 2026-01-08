@@ -55,7 +55,7 @@ export const appRouter = router({
       }),
 
     get: publicProcedure
-      .input(z.object({ id: z.string().uuid() }))
+      .input(z.object({ id: z.string() }))
       .query(async ({ ctx, input }) => {
         return ctx.spacesService.getEntrypoint(input.id);
       }),
@@ -65,7 +65,7 @@ export const appRouter = router({
     }),
 
     delete: publicProcedure
-      .input(z.object({ id: z.string().uuid() }))
+      .input(z.object({ id: z.string() }))
       .mutation(async ({ ctx, input }) => {
         await ctx.spacesService.deleteEntrypoint(input.id);
         return { success: true };
@@ -84,26 +84,26 @@ export const appRouter = router({
       }),
 
     get: publicProcedure
-      .input(z.object({ id: z.string().uuid() }))
+      .input(z.object({ id: z.string() }))
       .query(async ({ ctx, input }) => {
         return ctx.spacesService.getLayerWithStatus(input.id);
       }),
 
     list: publicProcedure
-      .input(z.object({ entrypointId: z.string().uuid().optional() }).optional())
+      .input(z.object({ entrypointId: z.string().optional() }).optional())
       .query(async ({ ctx, input }) => {
         return ctx.spacesService.listLayersWithStatus(input?.entrypointId);
       }),
 
     delete: publicProcedure
-      .input(z.object({ id: z.string().uuid() }))
+      .input(z.object({ id: z.string() }))
       .mutation(async ({ ctx, input }) => {
         await ctx.spacesService.deleteLayer(input.id);
         return { success: true };
       }),
 
     mount: publicProcedure
-      .input(z.object({ id: z.string().uuid() }))
+      .input(z.object({ id: z.string() }))
       .mutation(async ({ ctx, input }) => {
         const layer = await ctx.spacesService.getLayer(input.id);
         if (!layer) {
@@ -114,7 +114,7 @@ export const appRouter = router({
       }),
 
     unmount: publicProcedure
-      .input(z.object({ id: z.string().uuid() }))
+      .input(z.object({ id: z.string() }))
       .mutation(async ({ ctx, input }) => {
         const layer = await ctx.spacesService.getLayer(input.id);
         if (!layer) {
@@ -125,7 +125,7 @@ export const appRouter = router({
       }),
 
     openTerminal: publicProcedure
-      .input(z.object({ id: z.string().uuid() }))
+      .input(z.object({ id: z.string() }))
       .mutation(async ({ ctx, input }) => {
         const layer = await ctx.spacesService.getLayer(input.id);
         if (!layer) {
@@ -148,19 +148,19 @@ export const appRouter = router({
       }),
 
     get: publicProcedure
-      .input(z.object({ id: z.string().uuid() }))
+      .input(z.object({ id: z.string() }))
       .query(async ({ ctx, input }) => {
         return ctx.spacesService.getUserMountWithStatus(input.id);
       }),
 
     list: publicProcedure
-      .input(z.object({ entrypointId: z.string().uuid().optional() }).optional())
+      .input(z.object({ entrypointId: z.string().optional() }).optional())
       .query(async ({ ctx, input }) => {
         return ctx.spacesService.listUserMountsWithStatus(input?.entrypointId);
       }),
 
     delete: publicProcedure
-      .input(z.object({ id: z.string().uuid() }))
+      .input(z.object({ id: z.string() }))
       .mutation(async ({ ctx, input }) => {
         await ctx.spacesService.deleteUserMount(input.id);
         return { success: true };
@@ -174,7 +174,7 @@ export const appRouter = router({
       }),
 
     mount: publicProcedure
-      .input(z.object({ id: z.string().uuid() }))
+      .input(z.object({ id: z.string() }))
       .mutation(async ({ ctx, input }) => {
         const userMount = await ctx.spacesService.getUserMount(input.id);
         if (!userMount) {
@@ -185,7 +185,7 @@ export const appRouter = router({
       }),
 
     unmount: publicProcedure
-      .input(z.object({ id: z.string().uuid() }))
+      .input(z.object({ id: z.string() }))
       .mutation(async ({ ctx, input }) => {
         const userMount = await ctx.spacesService.getUserMount(input.id);
         if (!userMount) {
@@ -196,7 +196,7 @@ export const appRouter = router({
       }),
 
     openTerminal: publicProcedure
-      .input(z.object({ id: z.string().uuid() }))
+      .input(z.object({ id: z.string() }))
       .mutation(async ({ ctx, input }) => {
         const userMount = await ctx.spacesService.getUserMount(input.id);
         if (!userMount) {

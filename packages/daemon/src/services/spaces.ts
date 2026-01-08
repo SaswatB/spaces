@@ -1,6 +1,5 @@
-import { randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync } from 'node:fs';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { spawn } from 'node:child_process';
 import { eq } from 'drizzle-orm';
 import type { Db } from '../db/index.js';
@@ -54,9 +53,13 @@ export class SpacesService {
     }
 
     const now = new Date();
+    const inferredName = basename(input.path);
+    const name = input.name?.trim() || inferredName;
     const entrypoint: Entrypoint = {
-      id: randomUUID(),
-      name: input.name,
+      id: await this.generateUniqueId('ep', (id) =>
+        this.db.query.entrypoints.findFirst({ where: eq(entrypoints.id, id) })
+      ),
+      name,
       path: input.path,
       createdAt: now,
       updatedAt: now,
@@ -64,7 +67,7 @@ export class SpacesService {
 
     await this.db.insert(entrypoints).values({
       id: entrypoint.id,
-      name: entrypoint.name,
+      name,
       path: entrypoint.path,
       createdAt: now,
       updatedAt: now,
@@ -132,13 +135,23 @@ export class SpacesService {
     }
 
     const now = new Date();
-    const id = randomUUID();
+    const id = await this.generateUniqueId('lyr', (candidate) =>
+      this.db.query.layers.findFirst({ where: eq(layers.id, candidate) })
+    );
+    const name = await this.generateLayerName(entrypoint, input.name);
 
     // Create directories for this layer
     const upperDir = join(this.config.dataDir, 'layers', id, 'upper');
     const workDir = join(this.config.dataDir, 'layers', id, 'work');
     const defaultMountPath =
-      input.mountPath ?? join(this.config.dataDir, 'mounts', 'layers', id);
+      input.mountPath ??
+      join(
+        this.config.dataDir,
+        'mounts',
+        'layers',
+        entrypoint.id,
+        this.sanitizeMountComponent(name)
+      );
 
     mkdirSync(upperDir, { recursive: true });
     mkdirSync(workDir, { recursive: true });
@@ -146,7 +159,7 @@ export class SpacesService {
 
     const layer: Layer = {
       id,
-      name: input.name,
+      name,
       entrypointId: input.entrypointId,
       parentId: input.parentId ?? null,
       upperDir,
@@ -317,7 +330,9 @@ export class SpacesService {
     }
 
     const now = new Date();
-    const id = randomUUID();
+    const id = await this.generateUniqueId('mnt', (candidate) =>
+      this.db.query.userMounts.findFirst({ where: eq(userMounts.id, candidate) })
+    );
 
     // Create directories for this user mount
     const upperDir = join(this.config.dataDir, 'usermounts', id, 'upper');
@@ -363,6 +378,49 @@ export class SpacesService {
     }
 
     return userMount;
+  }
+
+  private sanitizeMountComponent(name: string): string {
+    return name.replace(/[\\/]/g, '_');
+  }
+
+  private async generateLayerName(
+    entrypoint: Entrypoint,
+    provided?: string
+  ): Promise<string> {
+    if (provided && provided.trim()) {
+      return provided.trim();
+    }
+    const existingLayers = await this.db.query.layers.findMany({
+      where: eq(layers.entrypointId, entrypoint.id),
+      columns: {
+        name: true,
+      },
+    });
+    const existingNames = new Set(existingLayers.map((layer) => layer.name));
+    let index = existingLayers.length + 1;
+    while (true) {
+      const candidate = `${entrypoint.name}:${index}`;
+      if (!existingNames.has(candidate)) {
+        return candidate;
+      }
+      index += 1;
+    }
+  }
+
+  private async generateUniqueId(
+    prefix: string,
+    exists: (id: string) => Promise<unknown>
+  ): Promise<string> {
+    const modulo = 10 ** 10;
+    while (true) {
+      const raw = Math.floor(Math.random() * modulo);
+      const id = `${prefix}_${String(raw).padStart(10, '0')}`;
+      const found = await exists(id);
+      if (!found) {
+        return id;
+      }
+    }
   }
 
   async getUserMount(id: string): Promise<UserMount | null> {

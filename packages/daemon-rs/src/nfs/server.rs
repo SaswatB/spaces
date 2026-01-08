@@ -208,16 +208,15 @@ impl SpacesNfs {
     }
 
     fn resolve_mount_view(&self, kind: &MountKind, mount_id: &str) -> Result<MountView, nfsstat3> {
-        let id = uuid::Uuid::parse_str(mount_id).map_err(|_| nfsstat3::NFS3ERR_NOENT)?;
         match kind {
             MountKind::Layer => {
                 let layer = self
                     .state
                     .db
-                    .get_layer(id)
+                    .get_layer(mount_id)
                     .map_err(|_| nfsstat3::NFS3ERR_IO)?
                     .ok_or(nfsstat3::NFS3ERR_NOENT)?;
-                let view = self.build_view_for_layer(layer.id)?;
+                let view = self.build_view_for_layer(&layer.id)?;
                 Ok(MountView {
                     view,
                     writable: true,
@@ -227,11 +226,11 @@ impl SpacesNfs {
                 let user_mount = self
                     .state
                     .db
-                    .get_user_mount(id)
+                    .get_user_mount(mount_id)
                     .map_err(|_| nfsstat3::NFS3ERR_IO)?
                     .ok_or(nfsstat3::NFS3ERR_NOENT)?;
                 if let Some(layer_id) = user_mount.attached_layer_id {
-                    let view = self.build_view_for_layer(layer_id)?;
+                    let view = self.build_view_for_layer(&layer_id)?;
                     Ok(MountView {
                         view,
                         writable: true,
@@ -240,7 +239,7 @@ impl SpacesNfs {
                     let entrypoint = self
                         .state
                         .db
-                    .get_entrypoint(user_mount.entrypoint_id)
+                    .get_entrypoint(&user_mount.entrypoint_id)
                     .map_err(|_| nfsstat3::NFS3ERR_IO)?
                     .ok_or(nfsstat3::NFS3ERR_NOENT)?;
                     Ok(MountView {
@@ -255,7 +254,7 @@ impl SpacesNfs {
         }
     }
 
-    fn build_view_for_layer(&self, layer_id: uuid::Uuid) -> Result<OverlayView, nfsstat3> {
+    fn build_view_for_layer(&self, layer_id: &str) -> Result<OverlayView, nfsstat3> {
         let layer = self
             .state
             .db
@@ -265,7 +264,7 @@ impl SpacesNfs {
         let entrypoint = self
             .state
             .db
-            .get_entrypoint(layer.entrypoint_id)
+            .get_entrypoint(&layer.entrypoint_id)
             .map_err(|_| nfsstat3::NFS3ERR_IO)?
             .ok_or(nfsstat3::NFS3ERR_NOENT)?;
 
@@ -276,7 +275,7 @@ impl SpacesNfs {
             current = if let Some(parent_id) = layer.parent_id {
                 self.state
                     .db
-                    .get_layer(parent_id)
+                    .get_layer(&parent_id)
                     .map_err(|_| nfsstat3::NFS3ERR_IO)?
             } else {
                 None
@@ -383,11 +382,10 @@ impl NFSFileSystem for SpacesNfs {
             },
             NodeRef::MountsDir => {
                 let mount_id = filename.clone();
-                let id = uuid::Uuid::parse_str(&mount_id).map_err(|_| nfsstat3::NFS3ERR_NOENT)?;
                 if self
                     .state
                     .db
-                    .get_user_mount(id)
+                    .get_user_mount(&mount_id)
                     .map_err(|_| nfsstat3::NFS3ERR_IO)?
                     .is_none()
                 {
@@ -402,11 +400,10 @@ impl NFSFileSystem for SpacesNfs {
             }
             NodeRef::LayersDir => {
                 let mount_id = filename.clone();
-                let id = uuid::Uuid::parse_str(&mount_id).map_err(|_| nfsstat3::NFS3ERR_NOENT)?;
                 if self
                     .state
                     .db
-                    .get_layer(id)
+                    .get_layer(&mount_id)
                     .map_err(|_| nfsstat3::NFS3ERR_IO)?
                     .is_none()
                 {

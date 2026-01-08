@@ -1,8 +1,7 @@
 use anyhow::Result;
-use rusqlite::{types::Type, Connection, OptionalExtension};
+use rusqlite::{Connection, OptionalExtension};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
-use uuid::Uuid;
 
 use crate::models::{Entrypoint, Layer, UserMount};
 
@@ -72,7 +71,7 @@ impl Database {
         )?;
         let rows = stmt.query_map([], |row| {
             Ok(Entrypoint {
-                id: parse_uuid(row.get::<_, String>(0)?)?,
+                id: row.get(0)?,
                 name: row.get(1)?,
                 path: row.get(2)?,
                 created_at: row.get(3)?,
@@ -86,15 +85,15 @@ impl Database {
         Ok(entrypoints)
     }
 
-    pub fn get_entrypoint(&self, id: Uuid) -> Result<Option<Entrypoint>> {
+    pub fn get_entrypoint(&self, id: &str) -> Result<Option<Entrypoint>> {
         let conn = self.connection.lock().expect("db lock poisoned");
         let mut stmt = conn.prepare(
             "SELECT id, name, path, created_at, updated_at FROM entrypoints WHERE id = ?1",
         )?;
         let entrypoint = stmt
-            .query_row([id.to_string()], |row| {
+            .query_row([id], |row| {
                 Ok(Entrypoint {
-                    id: parse_uuid(row.get::<_, String>(0)?)?,
+                    id: row.get(0)?,
                     name: row.get(1)?,
                     path: row.get(2)?,
                     created_at: row.get(3)?,
@@ -113,7 +112,7 @@ impl Database {
         let entrypoint = stmt
             .query_row([path], |row| {
                 Ok(Entrypoint {
-                    id: parse_uuid(row.get::<_, String>(0)?)?,
+                    id: row.get(0)?,
                     name: row.get(1)?,
                     path: row.get(2)?,
                     created_at: row.get(3)?,
@@ -130,7 +129,7 @@ impl Database {
             "INSERT INTO entrypoints (id, name, path, created_at, updated_at)
              VALUES (?1, ?2, ?3, ?4, ?5)",
             (
-                entrypoint.id.to_string(),
+                entrypoint.id.as_str(),
                 entrypoint.name.as_str(),
                 entrypoint.path.as_str(),
                 entrypoint.created_at,
@@ -140,13 +139,13 @@ impl Database {
         Ok(())
     }
 
-    pub fn delete_entrypoint(&self, id: Uuid) -> Result<()> {
+    pub fn delete_entrypoint(&self, id: &str) -> Result<()> {
         let conn = self.connection.lock().expect("db lock poisoned");
-        conn.execute("DELETE FROM entrypoints WHERE id = ?1", [id.to_string()])?;
+        conn.execute("DELETE FROM entrypoints WHERE id = ?1", [id])?;
         Ok(())
     }
 
-    pub fn list_layers(&self, entrypoint_id: Option<Uuid>) -> Result<Vec<Layer>> {
+    pub fn list_layers(&self, entrypoint_id: Option<&str>) -> Result<Vec<Layer>> {
         let conn = self.connection.lock().expect("db lock poisoned");
         let (query, params): (&str, Vec<String>) = if let Some(entrypoint_id) = entrypoint_id {
             (
@@ -165,10 +164,10 @@ impl Database {
         let mut stmt = conn.prepare(query)?;
         let rows = stmt.query_map(rusqlite::params_from_iter(params.iter()), |row| {
             Ok(Layer {
-                id: parse_uuid(row.get::<_, String>(0)?)?,
+                id: row.get(0)?,
                 name: row.get(1)?,
-                entrypoint_id: parse_uuid(row.get::<_, String>(2)?)?,
-                parent_id: parse_optional_uuid(row.get::<_, Option<String>>(3)?)?,
+                entrypoint_id: row.get(2)?,
+                parent_id: row.get(3)?,
                 upper_dir: row.get(4)?,
                 work_dir: row.get(5)?,
                 mount_path: row.get(6)?,
@@ -183,19 +182,19 @@ impl Database {
         Ok(layers)
     }
 
-    pub fn get_layer(&self, id: Uuid) -> Result<Option<Layer>> {
+    pub fn get_layer(&self, id: &str) -> Result<Option<Layer>> {
         let conn = self.connection.lock().expect("db lock poisoned");
         let mut stmt = conn.prepare(
             "SELECT id, name, entrypoint_id, parent_id, upper_dir, work_dir, mount_path, created_at, updated_at
              FROM layers WHERE id = ?1",
         )?;
         let layer = stmt
-            .query_row([id.to_string()], |row| {
+            .query_row([id], |row| {
                 Ok(Layer {
-                    id: parse_uuid(row.get::<_, String>(0)?)?,
+                    id: row.get(0)?,
                     name: row.get(1)?,
-                    entrypoint_id: parse_uuid(row.get::<_, String>(2)?)?,
-                    parent_id: parse_optional_uuid(row.get::<_, Option<String>>(3)?)?,
+                    entrypoint_id: row.get(2)?,
+                    parent_id: row.get(3)?,
                     upper_dir: row.get(4)?,
                     work_dir: row.get(5)?,
                     mount_path: row.get(6)?,
@@ -213,10 +212,10 @@ impl Database {
             "INSERT INTO layers (id, name, entrypoint_id, parent_id, upper_dir, work_dir, mount_path, created_at, updated_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             (
-                layer.id.to_string(),
+                layer.id.as_str(),
                 layer.name.as_str(),
-                layer.entrypoint_id.to_string(),
-                layer.parent_id.map(|id| id.to_string()),
+                layer.entrypoint_id.as_str(),
+                layer.parent_id.as_deref(),
                 layer.upper_dir.as_str(),
                 layer.work_dir.as_str(),
                 layer.mount_path.as_str(),
@@ -227,28 +226,28 @@ impl Database {
         Ok(())
     }
 
-    pub fn delete_layer(&self, id: Uuid) -> Result<()> {
+    pub fn delete_layer(&self, id: &str) -> Result<()> {
         let conn = self.connection.lock().expect("db lock poisoned");
-        conn.execute("DELETE FROM layers WHERE id = ?1", [id.to_string()])?;
+        conn.execute("DELETE FROM layers WHERE id = ?1", [id])?;
         Ok(())
     }
 
-    pub fn count_child_layers(&self, id: Uuid) -> Result<i64> {
+    pub fn count_child_layers(&self, id: &str) -> Result<i64> {
         let conn = self.connection.lock().expect("db lock poisoned");
         let mut stmt = conn.prepare("SELECT COUNT(*) FROM layers WHERE parent_id = ?1")?;
-        let count: i64 = stmt.query_row([id.to_string()], |row| row.get(0))?;
+        let count: i64 = stmt.query_row([id], |row| row.get(0))?;
         Ok(count)
     }
 
-    pub fn count_attached_user_mounts(&self, layer_id: Uuid) -> Result<i64> {
+    pub fn count_attached_user_mounts(&self, layer_id: &str) -> Result<i64> {
         let conn = self.connection.lock().expect("db lock poisoned");
         let mut stmt =
             conn.prepare("SELECT COUNT(*) FROM user_mounts WHERE attached_layer_id = ?1")?;
-        let count: i64 = stmt.query_row([layer_id.to_string()], |row| row.get(0))?;
+        let count: i64 = stmt.query_row([layer_id], |row| row.get(0))?;
         Ok(count)
     }
 
-    pub fn list_user_mounts(&self, entrypoint_id: Option<Uuid>) -> Result<Vec<UserMount>> {
+    pub fn list_user_mounts(&self, entrypoint_id: Option<&str>) -> Result<Vec<UserMount>> {
         let conn = self.connection.lock().expect("db lock poisoned");
         let (query, params): (&str, Vec<String>) = if let Some(entrypoint_id) = entrypoint_id {
             (
@@ -267,10 +266,10 @@ impl Database {
         let mut stmt = conn.prepare(query)?;
         let rows = stmt.query_map(rusqlite::params_from_iter(params.iter()), |row| {
             Ok(UserMount {
-                id: parse_uuid(row.get::<_, String>(0)?)?,
+                id: row.get(0)?,
                 name: row.get(1)?,
-                entrypoint_id: parse_uuid(row.get::<_, String>(2)?)?,
-                attached_layer_id: parse_optional_uuid(row.get::<_, Option<String>>(3)?)?,
+                entrypoint_id: row.get(2)?,
+                attached_layer_id: row.get(3)?,
                 upper_dir: row.get(4)?,
                 work_dir: row.get(5)?,
                 mount_path: row.get(6)?,
@@ -285,18 +284,18 @@ impl Database {
         Ok(mounts)
     }
 
-    pub fn list_user_mounts_by_layer(&self, layer_id: Uuid) -> Result<Vec<UserMount>> {
+    pub fn list_user_mounts_by_layer(&self, layer_id: &str) -> Result<Vec<UserMount>> {
         let conn = self.connection.lock().expect("db lock poisoned");
         let mut stmt = conn.prepare(
             "SELECT id, name, entrypoint_id, attached_layer_id, upper_dir, work_dir, mount_path, created_at, updated_at
              FROM user_mounts WHERE attached_layer_id = ?1 ORDER BY created_at",
         )?;
-        let rows = stmt.query_map([layer_id.to_string()], |row| {
+        let rows = stmt.query_map([layer_id], |row| {
             Ok(UserMount {
-                id: parse_uuid(row.get::<_, String>(0)?)?,
+                id: row.get(0)?,
                 name: row.get(1)?,
-                entrypoint_id: parse_uuid(row.get::<_, String>(2)?)?,
-                attached_layer_id: parse_optional_uuid(row.get::<_, Option<String>>(3)?)?,
+                entrypoint_id: row.get(2)?,
+                attached_layer_id: row.get(3)?,
                 upper_dir: row.get(4)?,
                 work_dir: row.get(5)?,
                 mount_path: row.get(6)?,
@@ -311,19 +310,19 @@ impl Database {
         Ok(mounts)
     }
 
-    pub fn get_user_mount(&self, id: Uuid) -> Result<Option<UserMount>> {
+    pub fn get_user_mount(&self, id: &str) -> Result<Option<UserMount>> {
         let conn = self.connection.lock().expect("db lock poisoned");
         let mut stmt = conn.prepare(
             "SELECT id, name, entrypoint_id, attached_layer_id, upper_dir, work_dir, mount_path, created_at, updated_at
              FROM user_mounts WHERE id = ?1",
         )?;
         let user_mount = stmt
-            .query_row([id.to_string()], |row| {
+            .query_row([id], |row| {
                 Ok(UserMount {
-                    id: parse_uuid(row.get::<_, String>(0)?)?,
+                    id: row.get(0)?,
                     name: row.get(1)?,
-                    entrypoint_id: parse_uuid(row.get::<_, String>(2)?)?,
-                    attached_layer_id: parse_optional_uuid(row.get::<_, Option<String>>(3)?)?,
+                    entrypoint_id: row.get(2)?,
+                    attached_layer_id: row.get(3)?,
                     upper_dir: row.get(4)?,
                     work_dir: row.get(5)?,
                     mount_path: row.get(6)?,
@@ -341,10 +340,10 @@ impl Database {
             "INSERT INTO user_mounts (id, name, entrypoint_id, attached_layer_id, upper_dir, work_dir, mount_path, created_at, updated_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             (
-                user_mount.id.to_string(),
+                user_mount.id.as_str(),
                 user_mount.name.as_str(),
-                user_mount.entrypoint_id.to_string(),
-                user_mount.attached_layer_id.map(|id| id.to_string()),
+                user_mount.entrypoint_id.as_str(),
+                user_mount.attached_layer_id.as_deref(),
                 user_mount.upper_dir.as_str(),
                 user_mount.work_dir.as_str(),
                 user_mount.mount_path.as_str(),
@@ -355,34 +354,21 @@ impl Database {
         Ok(())
     }
 
-    pub fn delete_user_mount(&self, id: Uuid) -> Result<()> {
+    pub fn delete_user_mount(&self, id: &str) -> Result<()> {
         let conn = self.connection.lock().expect("db lock poisoned");
-        conn.execute("DELETE FROM user_mounts WHERE id = ?1", [id.to_string()])?;
+        conn.execute("DELETE FROM user_mounts WHERE id = ?1", [id])?;
         Ok(())
     }
 
-    pub fn update_user_mount_layer(&self, id: Uuid, layer_id: Option<Uuid>) -> Result<()> {
+    pub fn update_user_mount_layer(&self, id: &str, layer_id: Option<&str>) -> Result<()> {
         let conn = self.connection.lock().expect("db lock poisoned");
         conn.execute(
             "UPDATE user_mounts SET attached_layer_id = ?1, updated_at = strftime('%s','now') WHERE id = ?2",
             (
-                layer_id.map(|layer| layer.to_string()),
-                id.to_string(),
+                layer_id,
+                id,
             ),
         )?;
         Ok(())
-    }
-}
-
-fn parse_uuid(value: String) -> rusqlite::Result<Uuid> {
-    Uuid::parse_str(&value).map_err(|err| {
-        rusqlite::Error::FromSqlConversionFailure(value.len(), Type::Text, Box::new(err))
-    })
-}
-
-fn parse_optional_uuid(value: Option<String>) -> rusqlite::Result<Option<Uuid>> {
-    match value {
-        Some(value) => Ok(Some(parse_uuid(value)?)),
-        None => Ok(None),
     }
 }

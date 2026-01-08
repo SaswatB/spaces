@@ -2,7 +2,8 @@ use utoipa::OpenApi;
 
 use crate::api::routes;
 use crate::models::{
-    Entrypoint, FileChange, FileChangeType, Layer, MountStatus, SyncState, SyncStatus, UserMount,
+    Entrypoint, FileChange, FileChangeType, Layer, LayerDiffEntry, LayerDiffType, MountStatus,
+    SyncState, SyncStatus, UserMount,
 };
 use crate::api::routes::{
     AttachLayerRequest, CreateEntrypointRequest, CreateLayerRequest, CreateUserMountRequest,
@@ -24,6 +25,7 @@ use crate::api::routes::{
         routes::delete_layer,
         routes::mount_layer,
         routes::unmount_layer,
+        routes::layer_diff,
         routes::list_user_mounts,
         routes::get_user_mount,
         routes::create_user_mount,
@@ -41,6 +43,8 @@ use crate::api::routes::{
         SyncState,
         FileChange,
         FileChangeType,
+        LayerDiffEntry,
+        LayerDiffType,
         HealthResponse,
         StatusResponse,
         LayerResponse,

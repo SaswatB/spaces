@@ -1,12 +1,11 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
-use uuid::Uuid;
 
 #[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct Entrypoint {
-    pub id: Uuid,
+    pub id: String,
     pub name: String,
     pub path: String,
     pub created_at: DateTime<Utc>,
@@ -16,10 +15,10 @@ pub struct Entrypoint {
 #[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct Layer {
-    pub id: Uuid,
+    pub id: String,
     pub name: String,
-    pub entrypoint_id: Uuid,
-    pub parent_id: Option<Uuid>,
+    pub entrypoint_id: String,
+    pub parent_id: Option<String>,
     pub upper_dir: String,
     pub work_dir: String,
     pub mount_path: String,
@@ -30,10 +29,10 @@ pub struct Layer {
 #[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct UserMount {
-    pub id: Uuid,
+    pub id: String,
     pub name: String,
-    pub entrypoint_id: Uuid,
-    pub attached_layer_id: Option<Uuid>,
+    pub entrypoint_id: String,
+    pub attached_layer_id: Option<String>,
     pub upper_dir: String,
     pub work_dir: String,
     pub mount_path: String,
@@ -75,7 +74,7 @@ pub enum SyncStatus {
 #[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct SyncState {
-    pub user_mount_id: Uuid,
+    pub user_mount_id: String,
     pub status: SyncStatus,
     pub last_synced_at: Option<DateTime<Utc>>,
     pub pending_changes: Vec<FileChange>,
@@ -88,6 +87,21 @@ pub enum FileChangeType {
     Add,
     Modify,
     Delete,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum LayerDiffType {
+    Add,
+    Modify,
+    Delete,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct LayerDiffEntry {
+    pub path: String,
+    pub change_type: LayerDiffType,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]

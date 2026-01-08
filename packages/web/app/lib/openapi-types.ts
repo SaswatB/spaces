@@ -68,6 +68,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/layers/{id}/diff": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["layer_diff"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/layers/{id}/mount": {
         parameters: {
             query?: never;
@@ -217,27 +233,21 @@ export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
         AttachLayerRequest: {
-            /** Format: uuid */
             layerId?: string | null;
-            /** Format: uuid */
             userMountId: string;
         };
         CreateEntrypointRequest: {
-            name: string;
+            name?: string | null;
             path: string;
         };
         CreateLayerRequest: {
-            /** Format: uuid */
             entrypointId: string;
             mountPath?: string | null;
-            name: string;
-            /** Format: uuid */
+            name?: string | null;
             parentId?: string | null;
         };
         CreateUserMountRequest: {
-            /** Format: uuid */
             attachedLayerId?: string | null;
-            /** Format: uuid */
             entrypointId: string;
             mountPath: string;
             name: string;
@@ -245,7 +255,6 @@ export interface components {
         Entrypoint: {
             /** Format: date-time */
             createdAt: string;
-            /** Format: uuid */
             id: string;
             name: string;
             path: string;
@@ -270,30 +279,30 @@ export interface components {
         Layer: {
             /** Format: date-time */
             createdAt: string;
-            /** Format: uuid */
             entrypointId: string;
-            /** Format: uuid */
             id: string;
             mountPath: string;
             name: string;
-            /** Format: uuid */
             parentId?: string | null;
             /** Format: date-time */
             updatedAt: string;
             upperDir: string;
             workDir: string;
         };
+        LayerDiffEntry: {
+            changeType: components["schemas"]["LayerDiffType"];
+            path: string;
+        };
+        /** @enum {string} */
+        LayerDiffType: "add" | "modify" | "delete";
         LayerResponse: {
             /** Format: date-time */
             createdAt: string;
-            /** Format: uuid */
             entrypointId: string;
-            /** Format: uuid */
             id: string;
             mountPath: string;
             mountStatus: components["schemas"]["MountStatus"];
             name: string;
-            /** Format: uuid */
             parentId?: string | null;
             /** Format: date-time */
             updatedAt: string;
@@ -301,7 +310,6 @@ export interface components {
             workDir: string;
         };
         ListQuery: {
-            /** Format: uuid */
             entrypointId?: string | null;
         };
         /** @enum {string} */
@@ -319,19 +327,15 @@ export interface components {
             lastSyncedAt?: string | null;
             pendingChanges: components["schemas"]["FileChange"][];
             status: components["schemas"]["SyncStatus"];
-            /** Format: uuid */
             userMountId: string;
         };
         /** @enum {string} */
         SyncStatus: "idle" | "syncing" | "error";
         UserMount: {
-            /** Format: uuid */
             attachedLayerId?: string | null;
             /** Format: date-time */
             createdAt: string;
-            /** Format: uuid */
             entrypointId: string;
-            /** Format: uuid */
             id: string;
             mountPath: string;
             name: string;
@@ -341,13 +345,10 @@ export interface components {
             workDir: string;
         };
         UserMountResponse: {
-            /** Format: uuid */
             attachedLayerId?: string | null;
             /** Format: date-time */
             createdAt: string;
-            /** Format: uuid */
             entrypointId: string;
-            /** Format: uuid */
             id: string;
             mountPath: string;
             mountStatus: components["schemas"]["MountStatus"];
@@ -554,6 +555,28 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content?: never;
+            };
+        };
+    };
+    layer_diff: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Layer ID */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LayerDiffEntry"][];
+                };
             };
         };
     };

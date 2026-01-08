@@ -9,7 +9,7 @@ import { z } from 'zod';
  * It's the "lower" directory in overlayfs terms - the read-only base.
  */
 export const EntrypointSchema = z.object({
-  id: z.string().uuid(),
+  id: z.string(),
   name: z.string().min(1),
   path: z.string().min(1), // Absolute path to the base directory
   createdAt: z.date(),
@@ -24,10 +24,10 @@ export type Entrypoint = z.infer<typeof EntrypointSchema>;
  * Layers get an automatic mount at their mountPath.
  */
 export const LayerSchema = z.object({
-  id: z.string().uuid(),
+  id: z.string(),
   name: z.string().min(1),
-  entrypointId: z.string().uuid(), // The root entrypoint this layer chain belongs to
-  parentId: z.string().uuid().nullable(), // null = directly on entrypoint, otherwise parent layer ID
+  entrypointId: z.string(), // The root entrypoint this layer chain belongs to
+  parentId: z.string().nullable(), // null = directly on entrypoint, otherwise parent layer ID
   upperDir: z.string().min(1), // Where changes are stored
   workDir: z.string().min(1), // Overlayfs work directory
   mountPath: z.string().min(1), // Where this layer is mounted
@@ -43,10 +43,10 @@ export type Layer = z.infer<typeof LayerSchema>;
  * This allows hot-switching between layers without remounting.
  */
 export const UserMountSchema = z.object({
-  id: z.string().uuid(),
+  id: z.string(),
   name: z.string().min(1),
-  entrypointId: z.string().uuid(), // The entrypoint this mount is based on
-  attachedLayerId: z.string().uuid().nullable(), // Which layer changes sync to/from (null = no sync)
+  entrypointId: z.string(), // The entrypoint this mount is based on
+  attachedLayerId: z.string().nullable(), // Which layer changes sync to/from (null = no sync)
   upperDir: z.string().min(1), // This mount's own upper directory
   workDir: z.string().min(1), // Overlayfs work directory
   mountPath: z.string().min(1), // The well-known path (e.g., ~/projects/myapp)
@@ -85,7 +85,7 @@ export const FileChangeSchema = z.object({
 export type FileChange = z.infer<typeof FileChangeSchema>;
 
 export const SyncStateSchema = z.object({
-  userMountId: z.string().uuid(),
+  userMountId: z.string(),
   status: SyncStatusSchema,
   lastSyncedAt: z.date().nullable(),
   pendingChanges: z.array(FileChangeSchema),
@@ -158,16 +158,16 @@ export type Config = z.infer<typeof ConfigSchema>;
 // ============================================================================
 
 export const CreateEntrypointInputSchema = z.object({
-  name: z.string().min(1),
+  name: z.string().min(1).optional(),
   path: z.string().min(1),
 });
 
 export type CreateEntrypointInput = z.infer<typeof CreateEntrypointInputSchema>;
 
 export const CreateLayerInputSchema = z.object({
-  name: z.string().min(1),
-  entrypointId: z.string().uuid(),
-  parentId: z.string().uuid().nullable(),
+  name: z.string().min(1).optional(),
+  entrypointId: z.string(),
+  parentId: z.string().nullable(),
   mountPath: z.string().min(1).optional(), // Auto-generated if not provided
 });
 
@@ -175,16 +175,16 @@ export type CreateLayerInput = z.infer<typeof CreateLayerInputSchema>;
 
 export const CreateUserMountInputSchema = z.object({
   name: z.string().min(1),
-  entrypointId: z.string().uuid(),
+  entrypointId: z.string(),
   mountPath: z.string().min(1),
-  attachedLayerId: z.string().uuid().nullable(),
+  attachedLayerId: z.string().nullable(),
 });
 
 export type CreateUserMountInput = z.infer<typeof CreateUserMountInputSchema>;
 
 export const AttachLayerInputSchema = z.object({
-  userMountId: z.string().uuid(),
-  layerId: z.string().uuid().nullable(), // null to detach
+  userMountId: z.string(),
+  layerId: z.string().nullable(), // null to detach
 });
 
 export type AttachLayerInput = z.infer<typeof AttachLayerInputSchema>;

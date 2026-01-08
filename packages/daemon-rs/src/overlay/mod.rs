@@ -220,7 +220,8 @@ impl OverlayEngine {
             fs::create_dir_all(parent_dir)?;
         }
         if !marker.exists() {
-            fs::write(marker, b"")?;
+            fs::write(&marker, b"")?;
+            self.apply_owner_from_path(&view.entrypoint, &marker)?;
         }
         Ok(())
     }
@@ -235,7 +236,8 @@ impl OverlayEngine {
             fs::create_dir_all(parent_dir)?;
         }
         if !marker.exists() {
-            fs::write(marker, b"")?;
+            fs::write(&marker, b"")?;
+            self.apply_owner_from_path(&view.entrypoint, &marker)?;
         }
         Ok(())
     }

@@ -7,10 +7,9 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use utoipa::{IntoParams, ToSchema};
-use uuid::Uuid;
 
 #[allow(unused_imports)]
-use crate::models::{Entrypoint, Layer, MountStatus, SyncState, UserMount};
+use crate::models::{Entrypoint, Layer, LayerDiffEntry, MountStatus, SyncState, UserMount};
 use crate::services::SpacesService;
 use crate::state::AppState;
 
@@ -36,10 +35,10 @@ pub struct StatusResponse {
 #[derive(Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct LayerResponse {
-    id: Uuid,
+    id: String,
     name: String,
-    entrypoint_id: Uuid,
-    parent_id: Option<Uuid>,
+    entrypoint_id: String,
+    parent_id: Option<String>,
     upper_dir: String,
     work_dir: String,
     mount_path: String,
@@ -51,10 +50,10 @@ pub struct LayerResponse {
 #[derive(Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct UserMountResponse {
-    id: Uuid,
+    id: String,
     name: String,
-    entrypoint_id: Uuid,
-    attached_layer_id: Option<Uuid>,
+    entrypoint_id: String,
+    attached_layer_id: Option<String>,
     upper_dir: String,
     work_dir: String,
     mount_path: String,
@@ -69,24 +68,24 @@ pub struct UserMountResponse {
 #[serde(rename_all = "camelCase")]
 pub struct ListQuery {
     #[serde(rename = "entrypointId")]
-    entrypoint_id: Option<Uuid>,
+    entrypoint_id: Option<String>,
 }
 
 #[derive(Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateEntrypointRequest {
-    name: String,
+    name: Option<String>,
     path: String,
 }
 
 #[derive(Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateLayerRequest {
-    name: String,
+    name: Option<String>,
     #[serde(rename = "entrypointId")]
-    entrypoint_id: Uuid,
+    entrypoint_id: String,
     #[serde(rename = "parentId")]
-    parent_id: Option<Uuid>,
+    parent_id: Option<String>,
     #[serde(rename = "mountPath")]
     mount_path: Option<String>,
 }
@@ -96,20 +95,20 @@ pub struct CreateLayerRequest {
 pub struct CreateUserMountRequest {
     name: String,
     #[serde(rename = "entrypointId")]
-    entrypoint_id: Uuid,
+    entrypoint_id: String,
     #[serde(rename = "mountPath")]
     mount_path: String,
     #[serde(rename = "attachedLayerId")]
-    attached_layer_id: Option<Uuid>,
+    attached_layer_id: Option<String>,
 }
 
 #[derive(Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct AttachLayerRequest {
     #[serde(rename = "userMountId")]
-    user_mount_id: Uuid,
+    user_mount_id: String,
     #[serde(rename = "layerId")]
-    layer_id: Option<Uuid>,
+    layer_id: Option<String>,
 }
 
 pub fn router(state: AppState) -> Router {
@@ -125,6 +124,7 @@ pub fn router(state: AppState) -> Router {
         .route("/layers/:id", get(get_layer).delete(delete_layer))
         .route("/layers/:id/mount", post(mount_layer))
         .route("/layers/:id/unmount", post(unmount_layer))
+        .route("/layers/:id/diff", get(layer_diff))
         .route("/user-mounts", get(list_user_mounts).post(create_user_mount))
         .route(
             "/user-mounts/:id",
@@ -213,7 +213,7 @@ pub async fn list_entrypoints(State(state): State<AppState>) -> impl IntoRespons
     get,
     path = "/entrypoints/{id}",
     params(
-        ("id" = Uuid, Path, description = "Entrypoint ID")
+        ("id" = String, Path, description = "Entrypoint ID")
     ),
     responses(
         (status = 200, body = Entrypoint),
@@ -223,10 +223,10 @@ pub async fn list_entrypoints(State(state): State<AppState>) -> impl IntoRespons
 )]
 pub async fn get_entrypoint(
     State(state): State<AppState>,
-    Path(id): Path<Uuid>,
+    Path(id): Path<String>,
 ) -> impl IntoResponse {
     let service = SpacesService::new(&state);
-    match service.get_entrypoint(id) {
+    match service.get_entrypoint(&id) {
         Ok(Some(entrypoint)) => Json(entrypoint).into_response(),
         Ok(None) => StatusCode::NOT_FOUND.into_response(),
         Err(err) => error_response(&err.to_string()),
@@ -265,7 +265,7 @@ pub async fn create_entrypoint(
     delete,
     path = "/entrypoints/{id}",
     params(
-        ("id" = Uuid, Path, description = "Entrypoint ID")
+        ("id" = String, Path, description = "Entrypoint ID")
     ),
     responses(
         (status = 204),
@@ -275,12 +275,12 @@ pub async fn create_entrypoint(
 )]
 pub async fn delete_entrypoint(
     State(state): State<AppState>,
-    Path(id): Path<Uuid>,
+    Path(id): Path<String>,
 ) -> impl IntoResponse {
     let state = state.clone();
     match tokio::task::spawn_blocking(move || {
         let service = SpacesService::new(&state);
-        service.delete_entrypoint(id)
+        service.delete_entrypoint(&id)
     })
     .await
     {
@@ -304,7 +304,7 @@ pub async fn list_layers(
     Query(query): Query<ListQuery>,
 ) -> impl IntoResponse {
     let service = SpacesService::new(&state);
-    match service.list_layers_with_status(query.entrypoint_id) {
+    match service.list_layers_with_status(query.entrypoint_id.as_deref()) {
         Ok(layers) => {
             let response = layers
                 .into_iter()
@@ -320,7 +320,7 @@ pub async fn list_layers(
     get,
     path = "/layers/{id}",
     params(
-        ("id" = Uuid, Path, description = "Layer ID")
+        ("id" = String, Path, description = "Layer ID")
     ),
     responses(
         (status = 200, body = LayerResponse),
@@ -330,10 +330,10 @@ pub async fn list_layers(
 )]
 pub async fn get_layer(
     State(state): State<AppState>,
-    Path(id): Path<Uuid>,
+    Path(id): Path<String>,
 ) -> impl IntoResponse {
     let service = SpacesService::new(&state);
-    match service.get_layer(id) {
+    match service.get_layer(&id) {
         Ok(Some(layer)) => {
             let status = service
                 .list_layers_with_status(None)
@@ -388,7 +388,7 @@ pub async fn create_layer(
     delete,
     path = "/layers/{id}",
     params(
-        ("id" = Uuid, Path, description = "Layer ID")
+        ("id" = String, Path, description = "Layer ID")
     ),
     responses(
         (status = 204)
@@ -397,12 +397,12 @@ pub async fn create_layer(
 )]
 pub async fn delete_layer(
     State(state): State<AppState>,
-    Path(id): Path<Uuid>,
+    Path(id): Path<String>,
 ) -> impl IntoResponse {
     let state = state.clone();
     match tokio::task::spawn_blocking(move || {
         let service = SpacesService::new(&state);
-        service.delete_layer(id)
+        service.delete_layer(&id)
     })
     .await
     {
@@ -416,7 +416,7 @@ pub async fn delete_layer(
     post,
     path = "/layers/{id}/mount",
     params(
-        ("id" = Uuid, Path, description = "Layer ID")
+        ("id" = String, Path, description = "Layer ID")
     ),
     responses(
         (status = 200)
@@ -425,12 +425,12 @@ pub async fn delete_layer(
 )]
 pub async fn mount_layer(
     State(state): State<AppState>,
-    Path(id): Path<Uuid>,
+    Path(id): Path<String>,
 ) -> impl IntoResponse {
     let state = state.clone();
     match tokio::task::spawn_blocking(move || -> anyhow::Result<Option<()>> {
         let service = SpacesService::new(&state);
-        match service.get_layer(id)? {
+        match service.get_layer(&id)? {
             Some(layer) => {
                 service.mount_layer(&layer)?;
                 Ok(Some(()))
@@ -451,7 +451,7 @@ pub async fn mount_layer(
     post,
     path = "/layers/{id}/unmount",
     params(
-        ("id" = Uuid, Path, description = "Layer ID")
+        ("id" = String, Path, description = "Layer ID")
     ),
     responses(
         (status = 200)
@@ -460,12 +460,12 @@ pub async fn mount_layer(
 )]
 pub async fn unmount_layer(
     State(state): State<AppState>,
-    Path(id): Path<Uuid>,
+    Path(id): Path<String>,
 ) -> impl IntoResponse {
     let state = state.clone();
     match tokio::task::spawn_blocking(move || -> anyhow::Result<Option<()>> {
         let service = SpacesService::new(&state);
-        match service.get_layer(id)? {
+        match service.get_layer(&id)? {
             Some(layer) => {
                 service.unmount_layer(&layer)?;
                 Ok(Some(()))
@@ -477,6 +477,34 @@ pub async fn unmount_layer(
     {
         Ok(Ok(Some(()))) => StatusCode::OK.into_response(),
         Ok(Ok(None)) => StatusCode::NOT_FOUND.into_response(),
+        Ok(Err(err)) => error_response(&err.to_string()),
+        Err(err) => error_response(&err.to_string()),
+    }
+}
+
+#[utoipa::path(
+    get,
+    path = "/layers/{id}/diff",
+    params(
+        ("id" = String, Path, description = "Layer ID")
+    ),
+    responses(
+        (status = 200, body = [LayerDiffEntry])
+    ),
+    tag = "layers"
+)]
+pub async fn layer_diff(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let state = state.clone();
+    match tokio::task::spawn_blocking(move || {
+        let service = SpacesService::new(&state);
+        service.layer_diff(&id)
+    })
+    .await
+    {
+        Ok(Ok(entries)) => Json(entries).into_response(),
         Ok(Err(err)) => error_response(&err.to_string()),
         Err(err) => error_response(&err.to_string()),
     }
@@ -496,7 +524,7 @@ pub async fn list_user_mounts(
     Query(query): Query<ListQuery>,
 ) -> impl IntoResponse {
     let service = SpacesService::new(&state);
-    match service.list_user_mounts_with_status(query.entrypoint_id) {
+    match service.list_user_mounts_with_status(query.entrypoint_id.as_deref()) {
         Ok(mounts) => {
             let response = mounts
                 .into_iter()
@@ -512,7 +540,7 @@ pub async fn list_user_mounts(
     get,
     path = "/user-mounts/{id}",
     params(
-        ("id" = Uuid, Path, description = "User mount ID")
+        ("id" = String, Path, description = "User mount ID")
     ),
     responses(
         (status = 200, body = UserMountResponse),
@@ -522,10 +550,10 @@ pub async fn list_user_mounts(
 )]
 pub async fn get_user_mount(
     State(state): State<AppState>,
-    Path(id): Path<Uuid>,
+    Path(id): Path<String>,
 ) -> impl IntoResponse {
     let service = SpacesService::new(&state);
-    match service.get_user_mount(id) {
+    match service.get_user_mount(&id) {
         Ok(Some(user_mount)) => {
             let status = service
                 .list_user_mounts_with_status(None)
@@ -586,7 +614,7 @@ pub async fn create_user_mount(
     delete,
     path = "/user-mounts/{id}",
     params(
-        ("id" = Uuid, Path, description = "User mount ID")
+        ("id" = String, Path, description = "User mount ID")
     ),
     responses(
         (status = 204)
@@ -595,12 +623,12 @@ pub async fn create_user_mount(
 )]
 pub async fn delete_user_mount(
     State(state): State<AppState>,
-    Path(id): Path<Uuid>,
+    Path(id): Path<String>,
 ) -> impl IntoResponse {
     let state = state.clone();
     match tokio::task::spawn_blocking(move || {
         let service = SpacesService::new(&state);
-        service.delete_user_mount(id)
+        service.delete_user_mount(&id)
     })
     .await
     {
@@ -614,7 +642,7 @@ pub async fn delete_user_mount(
     post,
     path = "/user-mounts/{id}/mount",
     params(
-        ("id" = Uuid, Path, description = "User mount ID")
+        ("id" = String, Path, description = "User mount ID")
     ),
     responses(
         (status = 200)
@@ -623,12 +651,12 @@ pub async fn delete_user_mount(
 )]
 pub async fn mount_user_mount(
     State(state): State<AppState>,
-    Path(id): Path<Uuid>,
+    Path(id): Path<String>,
 ) -> impl IntoResponse {
     let state = state.clone();
     match tokio::task::spawn_blocking(move || -> anyhow::Result<Option<()>> {
         let service = SpacesService::new(&state);
-        match service.get_user_mount(id)? {
+        match service.get_user_mount(&id)? {
             Some(user_mount) => {
                 service.mount_user_mount(&user_mount)?;
                 Ok(Some(()))
@@ -649,7 +677,7 @@ pub async fn mount_user_mount(
     post,
     path = "/user-mounts/{id}/unmount",
     params(
-        ("id" = Uuid, Path, description = "User mount ID")
+        ("id" = String, Path, description = "User mount ID")
     ),
     responses(
         (status = 200)
@@ -658,12 +686,12 @@ pub async fn mount_user_mount(
 )]
 pub async fn unmount_user_mount(
     State(state): State<AppState>,
-    Path(id): Path<Uuid>,
+    Path(id): Path<String>,
 ) -> impl IntoResponse {
     let state = state.clone();
     match tokio::task::spawn_blocking(move || -> anyhow::Result<Option<()>> {
         let service = SpacesService::new(&state);
-        match service.get_user_mount(id)? {
+        match service.get_user_mount(&id)? {
             Some(user_mount) => {
                 service.unmount_user_mount(&user_mount)?;
                 Ok(Some(()))
