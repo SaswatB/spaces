@@ -1,11 +1,18 @@
 use anyhow::Result;
 use std::collections::HashMap;
 use std::fs;
+#[cfg(unix)]
+use std::ffi::CString;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::models::FileChange;
+
+#[cfg(unix)]
+use std::os::unix::ffi::OsStrExt;
+#[cfg(unix)]
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
 #[derive(Clone)]
 pub struct ReplicationEngine {
@@ -77,6 +84,7 @@ pub fn reconcile_trees(source_root: &Path, target_root: &Path) -> Result<()> {
 fn copy_path(source: &Path, target: &Path) -> Result<()> {
     if source.is_dir() {
         fs::create_dir_all(target)?;
+        apply_metadata(target, source)?;
         return Ok(());
     }
     if let Some(parent) = target.parent() {
@@ -84,6 +92,7 @@ fn copy_path(source: &Path, target: &Path) -> Result<()> {
     }
     if source.exists() {
         fs::copy(source, target)?;
+        apply_metadata(target, source)?;
     }
     Ok(())
 }
@@ -111,14 +120,33 @@ fn copy_directory_contents(source: &Path, target: &Path, root: &Path) -> Result<
         let target_path = target.join(relative);
         if source_path.is_dir() {
             fs::create_dir_all(&target_path)?;
+            apply_metadata(&target_path, &source_path)?;
             copy_directory_contents(&source_path, target, root)?;
         } else {
             if let Some(parent) = target_path.parent() {
                 fs::create_dir_all(parent)?;
             }
             fs::copy(&source_path, &target_path)?;
+            apply_metadata(&target_path, &source_path)?;
         }
     }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn apply_metadata(target: &Path, source: &Path) -> Result<()> {
+    let meta = fs::metadata(source)?;
+    fs::set_permissions(target, fs::Permissions::from_mode(meta.mode()))?;
+    if let Ok(c_path) = CString::new(target.as_os_str().as_bytes()) {
+        unsafe {
+            libc::chown(c_path.as_ptr(), meta.uid(), meta.gid());
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn apply_metadata(_target: &Path, _source: &Path) -> Result<()> {
     Ok(())
 }
 

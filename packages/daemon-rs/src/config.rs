@@ -27,7 +27,7 @@ impl Config {
 
         let nfs_host = env::var("SPACES_NFS_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
         let nfs_port = env::var("SPACES_NFS_PORT")
-            .unwrap_or_else(|_| "2049".to_string())
+            .unwrap_or_else(|_| "11111".to_string())
             .parse::<u16>()
             .context("SPACES_NFS_PORT must be a valid u16")?;
         let nfs_export_root =

@@ -151,6 +151,62 @@ impl SpacesNfs {
         }
     }
 
+    async fn list_overlay_dir(
+        &self,
+        view: OverlayView,
+        relative: String,
+    ) -> Result<Vec<String>, nfsstat3> {
+        tokio::task::spawn_blocking(move || {
+            let engine = OverlayEngine::new();
+            engine.list_dir(&view, &relative)
+        })
+        .await
+        .map_err(|_| nfsstat3::NFS3ERR_IO)
+    }
+
+    async fn ensure_upper_parent_dirs(
+        &self,
+        view: OverlayView,
+        relative: PathBuf,
+    ) -> Result<(), nfsstat3> {
+        tokio::task::spawn_blocking(move || {
+            let engine = OverlayEngine::new();
+            engine.ensure_parent_dirs(&view, &relative)
+        })
+        .await
+        .map_err(|_| nfsstat3::NFS3ERR_IO)?
+        .map_err(|_| nfsstat3::NFS3ERR_IO)
+    }
+
+    async fn apply_lower_metadata(
+        &self,
+        view: OverlayView,
+        relative: PathBuf,
+        target: PathBuf,
+    ) -> Result<(), nfsstat3> {
+        tokio::task::spawn_blocking(move || {
+            let engine = OverlayEngine::new();
+            engine.apply_lower_metadata(&view, &relative, &target)
+        })
+        .await
+        .map_err(|_| nfsstat3::NFS3ERR_IO)?
+        .map_err(|_| nfsstat3::NFS3ERR_IO)
+    }
+
+    async fn apply_entrypoint_owner(
+        &self,
+        view: OverlayView,
+        target: PathBuf,
+    ) -> Result<(), nfsstat3> {
+        tokio::task::spawn_blocking(move || {
+            let engine = OverlayEngine::new();
+            engine.apply_entrypoint_owner(&view, &target)
+        })
+        .await
+        .map_err(|_| nfsstat3::NFS3ERR_IO)?
+        .map_err(|_| nfsstat3::NFS3ERR_IO)
+    }
+
     fn resolve_mount_view(&self, kind: &MountKind, mount_id: &str) -> Result<MountView, nfsstat3> {
         let id = uuid::Uuid::parse_str(mount_id).map_err(|_| nfsstat3::NFS3ERR_NOENT)?;
         match kind {
@@ -540,11 +596,9 @@ impl NFSFileSystem for SpacesNfs {
         let target = Self::top_layer_path(&view.view)
             .ok_or(nfsstat3::NFS3ERR_ROFS)?
             .join(&relative);
-        if let Some(parent) = target.parent() {
-            fs::create_dir_all(parent)
-                .await
-                .map_err(|_| nfsstat3::NFS3ERR_IO)?;
-        }
+        let target_exists = target.exists();
+        self.ensure_upper_parent_dirs(view.view.clone(), relative.clone())
+            .await?;
         let mut file = OpenOptions::new()
             .create(true)
             .write(true)
@@ -558,6 +612,10 @@ impl NFSFileSystem for SpacesNfs {
         file.write_all(data)
             .await
             .map_err(|_| nfsstat3::NFS3ERR_IO)?;
+        if !target_exists {
+            self.apply_entrypoint_owner(view.view.clone(), target.clone())
+                .await?;
+        }
         let meta = file.metadata().await.map_err(|_| nfsstat3::NFS3ERR_IO)?;
         self.emit_op(kind, &mount_id, &relative, NfsOpKind::Write);
         Ok(fs_util::metadata_to_fattr3(id, &meta))
@@ -592,17 +650,19 @@ impl NFSFileSystem for SpacesNfs {
         let target = Self::top_layer_path(&view.view)
             .ok_or(nfsstat3::NFS3ERR_ROFS)?
             .join(&relative);
-        if let Some(parent) = target.parent() {
-            fs::create_dir_all(parent)
-                .await
-                .map_err(|_| nfsstat3::NFS3ERR_IO)?;
-        }
+        let target_exists = target.exists();
+        self.ensure_upper_parent_dirs(view.view.clone(), relative.clone())
+            .await?;
         let _ = OpenOptions::new()
             .create(true)
             .write(true)
             .open(&target)
             .await
             .map_err(|_| nfsstat3::NFS3ERR_IO)?;
+        if !target_exists {
+            self.apply_entrypoint_owner(view.view.clone(), target.clone())
+                .await?;
+        }
         let meta = fs::metadata(&target)
             .await
             .map_err(|_| nfsstat3::NFS3ERR_IO)?;
@@ -656,9 +716,15 @@ impl NFSFileSystem for SpacesNfs {
         let target = Self::top_layer_path(&view.view)
             .ok_or(nfsstat3::NFS3ERR_ROFS)?
             .join(&relative);
+        self.ensure_upper_parent_dirs(view.view.clone(), relative.clone())
+            .await?;
         fs::create_dir_all(&target)
             .await
             .map_err(|_| nfsstat3::NFS3ERR_IO)?;
+        self.apply_lower_metadata(view.view.clone(), relative.clone(), target.clone())
+            .await?;
+        self.apply_entrypoint_owner(view.view.clone(), target.clone())
+            .await?;
         let meta = fs::metadata(&target)
             .await
             .map_err(|_| nfsstat3::NFS3ERR_IO)?;
@@ -780,11 +846,8 @@ impl NFSFileSystem for SpacesNfs {
         let top = Self::top_layer_path(&view.view).ok_or(nfsstat3::NFS3ERR_ROFS)?;
         let from_target = top.join(&from_relative);
         let to_target = top.join(&to_relative);
-        if let Some(parent) = to_target.parent() {
-            fs::create_dir_all(parent)
-                .await
-                .map_err(|_| nfsstat3::NFS3ERR_IO)?;
-        }
+        self.ensure_upper_parent_dirs(view.view.clone(), to_relative.clone())
+            .await?;
         if from_target.exists() {
             fs::rename(&from_target, &to_target)
                 .await
@@ -798,10 +861,14 @@ impl NFSFileSystem for SpacesNfs {
                     fs::copy(&resolved.source, &to_target)
                         .await
                         .map_err(|_| nfsstat3::NFS3ERR_IO)?;
+                    self.apply_lower_metadata(view.view.clone(), to_relative.clone(), to_target.clone())
+                        .await?;
                 } else {
                     fs::create_dir_all(&to_target)
                         .await
                         .map_err(|_| nfsstat3::NFS3ERR_IO)?;
+                    self.apply_lower_metadata(view.view.clone(), to_relative.clone(), to_target.clone())
+                        .await?;
                 }
                 self.overlay
                     .mark_whiteout(&view.view, &relative_str)
@@ -852,7 +919,7 @@ impl NFSFileSystem for SpacesNfs {
             }
             NodeRef::MountRoot { mount_id, kind } => {
                 let view = self.resolve_mount_view(&kind, &mount_id)?;
-                let names = self.overlay.list_dir(&view.view, "");
+                let names = self.list_overlay_dir(view.view, "".to_string()).await?;
                 let base = self.mount_root_path(&kind, &mount_id);
                 (names, base, NodeRef::MountRoot { mount_id, kind })
             }
@@ -862,7 +929,9 @@ impl NFSFileSystem for SpacesNfs {
                 relative,
             } => {
                 let view = self.resolve_mount_view(&kind, &mount_id)?;
-                let names = self.overlay.list_dir(&view.view, &relative.to_string_lossy());
+                let names = self
+                    .list_overlay_dir(view.view, relative.to_string_lossy().to_string())
+                    .await?;
                 let base_node = NodeRef::MountPath {
                     mount_id,
                     kind,
@@ -932,10 +1001,14 @@ impl NFSFileSystem for SpacesNfs {
             .skip(start_index)
             .take(max_entries)
         {
+            let attr = match self.getattr(id).await {
+                Ok(attr) => attr,
+                Err(_) => Self::synthetic_dir_attr(id),
+            };
             entries.push(DirEntry {
                 fileid: id,
                 name: name.into_bytes().into(),
-                attr: Self::synthetic_dir_attr(id),
+                attr,
             });
         }
 
@@ -974,11 +1047,8 @@ impl NFSFileSystem for SpacesNfs {
         relative.push(&linkname);
         let top = Self::top_layer_path(&view.view).ok_or(nfsstat3::NFS3ERR_ROFS)?;
         let link_path = top.join(&relative);
-        if let Some(parent) = link_path.parent() {
-            fs::create_dir_all(parent)
-                .await
-                .map_err(|_| nfsstat3::NFS3ERR_IO)?;
-        }
+        self.ensure_upper_parent_dirs(view.view.clone(), relative.clone())
+            .await?;
         #[cfg(unix)]
         {
             let link_path = link_path.clone();
@@ -987,6 +1057,8 @@ impl NFSFileSystem for SpacesNfs {
                 .map_err(|_| nfsstat3::NFS3ERR_IO)?
                 .map_err(|_| nfsstat3::NFS3ERR_IO)?;
         }
+        self.apply_entrypoint_owner(view.view.clone(), link_path.clone())
+            .await?;
         let meta = fs::symlink_metadata(&link_path)
             .await
             .map_err(|_| nfsstat3::NFS3ERR_IO)?;

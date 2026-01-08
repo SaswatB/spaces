@@ -12,6 +12,7 @@ use crate::models::{
 use crate::nfs::{ensure_mount, is_mounted, MountSpec, NfsExport, NfsOp, NfsOpKind, NfsRegistry};
 use crate::replication::{reconcile_trees, replay_change};
 use crate::state::AppState;
+use tracing::info;
 
 #[derive(Clone)]
 pub struct SpacesService {
@@ -100,6 +101,7 @@ impl SpacesService {
         parent_id: Option<Uuid>,
         mount_path: Option<String>,
     ) -> Result<Layer> {
+        info!(layer_name = %name, %entrypoint_id, "Creating layer");
         let entrypoint = self
             .db
             .get_entrypoint(entrypoint_id)?
@@ -157,6 +159,7 @@ impl SpacesService {
     }
 
     pub fn mount_layer(&self, layer: &Layer) -> Result<()> {
+        info!(layer_id = %layer.id, mount_path = %layer.mount_path, "Mounting layer");
         let export_path = self.layer_export_path(layer.id);
         self.nfs_registry.register(NfsExport {
             mount_id: layer.id.to_string(),
@@ -174,6 +177,7 @@ impl SpacesService {
     }
 
     pub fn unmount_layer(&self, layer: &Layer) -> Result<()> {
+        info!(layer_id = %layer.id, mount_path = %layer.mount_path, "Unmounting layer");
         crate::nfs::unmount(&layer.mount_path)
     }
 
@@ -209,6 +213,7 @@ impl SpacesService {
         mount_path: String,
         attached_layer_id: Option<Uuid>,
     ) -> Result<UserMount> {
+        info!(mount_name = %name, %entrypoint_id, %mount_path, "Creating user mount");
         let entrypoint = self
             .db
             .get_entrypoint(entrypoint_id)?
@@ -292,6 +297,7 @@ impl SpacesService {
     }
 
     pub fn mount_user_mount(&self, user_mount: &UserMount) -> Result<()> {
+        info!(mount_id = %user_mount.id, mount_path = %user_mount.mount_path, "Mounting user mount");
         let export_path = self.user_mount_export_path(user_mount.id);
         self.nfs_registry.register(NfsExport {
             mount_id: user_mount.id.to_string(),
@@ -309,24 +315,61 @@ impl SpacesService {
     }
 
     pub fn unmount_user_mount(&self, user_mount: &UserMount) -> Result<()> {
+        info!(mount_id = %user_mount.id, mount_path = %user_mount.mount_path, "Unmounting user mount");
         crate::nfs::unmount(&user_mount.mount_path)
     }
 
     pub fn remount_all(&self) -> Result<()> {
+        info!("Remounting all layers and user mounts");
         let layers = self.db.list_layers(None)?;
         let sorted_layers = self.sort_layers_by_dependency(layers);
         for layer in sorted_layers {
-            let _ = self.mount_layer(&layer);
+            if let Err(err) = self.mount_layer(&layer) {
+                info!(layer_id = %layer.id, error = %err, "Failed to mount layer during remount");
+                continue;
+            }
+            match is_mounted(&layer.mount_path) {
+                Ok(true) => info!(layer_id = %layer.id, "Layer mounted"),
+                Ok(false) => info!(layer_id = %layer.id, "Layer mount missing after mount attempt"),
+                Err(err) => info!(layer_id = %layer.id, error = %err, "Layer mount check failed"),
+            }
         }
 
         let user_mounts = self.db.list_user_mounts(None)?;
         for user_mount in user_mounts {
-            let _ = self.mount_user_mount(&user_mount);
+            if let Err(err) = self.mount_user_mount(&user_mount) {
+                info!(mount_id = %user_mount.id, error = %err, "Failed to mount user mount during remount");
+                continue;
+            }
+            match is_mounted(&user_mount.mount_path) {
+                Ok(true) => info!(mount_id = %user_mount.id, "User mount mounted"),
+                Ok(false) => info!(mount_id = %user_mount.id, "User mount missing after mount attempt"),
+                Err(err) => info!(mount_id = %user_mount.id, error = %err, "User mount check failed"),
+            }
+        }
+        Ok(())
+    }
+
+    pub fn unmount_all(&self) -> Result<()> {
+        info!("Unmounting all layers and user mounts");
+        let user_mounts = self.db.list_user_mounts(None)?;
+        for user_mount in user_mounts {
+            if let Err(err) = self.unmount_user_mount(&user_mount) {
+                info!(mount_id = %user_mount.id, error = %err, "Failed to unmount user mount");
+            }
+        }
+
+        let layers = self.db.list_layers(None)?;
+        for layer in layers {
+            if let Err(err) = self.unmount_layer(&layer) {
+                info!(layer_id = %layer.id, error = %err, "Failed to unmount layer");
+            }
         }
         Ok(())
     }
 
     pub fn handle_nfs_op(&self, op: NfsOp) -> Result<()> {
+        info!(mount_id = %op.mount_id, path = %op.relative_path, kind = ?op.kind, "Replicating NFS op");
         let source_root = self.mount_path_for_id(&op.mount_id)?;
         let Some(layer_id) = self.resolve_layer_id(&op.mount_id)? else {
             return Ok(());

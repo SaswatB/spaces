@@ -17,3 +17,4 @@ tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 uuid = { version = "1.10", features = ["serde", "v4"] }
 nfsserve = "0.10"
 utoipa = { version = "4.2", features = ["axum_extras", "chrono", "uuid"] }
+libc = "0.2"

@@ -2,6 +2,14 @@ use std::collections::{BTreeSet, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+#[cfg(unix)]
+use std::ffi::CString;
+#[cfg(unix)]
+use std::os::unix::ffi::OsStrExt;
+#[cfg(unix)]
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
+use tracing::debug;
+
 mod whiteout;
 
 pub use whiteout::{is_whiteout_marker, marker_name, OPAQUE_MARKER};
@@ -109,16 +117,92 @@ impl OverlayEngine {
         }
 
         if lower_path.is_dir() {
+            self.ensure_parent_dirs(view, relative)?;
             fs::create_dir_all(&upper_path)?;
+            debug!(
+                upper = %upper_path.display(),
+                lower = %lower_path.display(),
+                "Copy-up directory"
+            );
+            self.apply_metadata(&upper_path, &lower_path)?;
             self.mark_opaque(view, &relative.to_string_lossy())?;
         } else {
-            if let Some(parent) = upper_path.parent() {
-                fs::create_dir_all(parent)?;
-            }
-            fs::copy(lower_path, upper_path)?;
+            self.ensure_parent_dirs(view, relative)?;
+            fs::copy(&lower_path, &upper_path)?;
+            debug!(
+                upper = %upper_path.display(),
+                lower = %lower_path.display(),
+                "Copy-up file"
+            );
+            self.apply_metadata(&upper_path, &lower_path)?;
         }
 
         Ok(())
+    }
+
+    pub fn ensure_parent_dirs(
+        &self,
+        view: &OverlayView,
+        relative_path: &Path,
+    ) -> std::io::Result<()> {
+        let Some(top_upper) = view.layers.first() else {
+            return Ok(());
+        };
+        let Some(parent) = relative_path.parent() else {
+            return Ok(());
+        };
+        if parent.components().count() == 0 {
+            return Ok(());
+        }
+
+        let mut current = PathBuf::new();
+        for component in parent.components() {
+            current.push(component);
+            let upper_dir = top_upper.join(&current);
+            if upper_dir.exists() {
+                continue;
+            }
+            let meta_source = self.lower_source_path(view, &current);
+            fs::create_dir_all(&upper_dir)?;
+            if let Some(source) = meta_source {
+                if source.is_dir() {
+                    self.apply_metadata(&upper_dir, &source)?;
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    pub fn apply_lower_metadata(
+        &self,
+        view: &OverlayView,
+        relative: &Path,
+        target: &Path,
+    ) -> std::io::Result<()> {
+        if let Some(source) = self.lower_source_path(view, relative) {
+            debug!(
+                target = %target.display(),
+                source = %source.display(),
+                "Applying lower metadata"
+            );
+            self.apply_metadata(target, &source)?;
+        } else {
+            debug!(
+                target = %target.display(),
+                relative = %relative.display(),
+                "No lower metadata source found"
+            );
+        }
+        Ok(())
+    }
+
+    pub fn apply_entrypoint_owner(
+        &self,
+        view: &OverlayView,
+        target: &Path,
+    ) -> std::io::Result<()> {
+        self.apply_owner_from_path(&view.entrypoint, target)
     }
 
     pub fn mark_whiteout(&self, view: &OverlayView, relative_path: &str) -> std::io::Result<()> {
@@ -181,5 +265,68 @@ impl OverlayEngine {
         }
 
         false
+    }
+
+    fn lower_source_path(&self, view: &OverlayView, relative: &Path) -> Option<PathBuf> {
+        for layer in view.layers.iter().skip(1) {
+            let candidate = layer.join(relative);
+            if candidate.exists() {
+                return Some(candidate);
+            }
+        }
+        let entry = view.entrypoint.join(relative);
+        if entry.exists() {
+            Some(entry)
+        } else {
+            None
+        }
+    }
+
+    #[cfg(unix)]
+    fn apply_metadata(&self, target: &Path, source: &Path) -> std::io::Result<()> {
+        let meta = fs::metadata(source)?;
+        debug!(
+            target = %target.display(),
+            source = %source.display(),
+            uid = meta.uid(),
+            gid = meta.gid(),
+            mode = meta.mode(),
+            "Applying metadata"
+        );
+        fs::set_permissions(target, fs::Permissions::from_mode(meta.mode()))?;
+        if let Ok(c_path) = CString::new(target.as_os_str().as_bytes()) {
+            unsafe {
+                libc::chown(c_path.as_ptr(), meta.uid(), meta.gid());
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    fn apply_owner_from_path(&self, source: &Path, target: &Path) -> std::io::Result<()> {
+        let meta = fs::metadata(source)?;
+        debug!(
+            target = %target.display(),
+            source = %source.display(),
+            uid = meta.uid(),
+            gid = meta.gid(),
+            "Applying entrypoint owner"
+        );
+        if let Ok(c_path) = CString::new(target.as_os_str().as_bytes()) {
+            unsafe {
+                libc::chown(c_path.as_ptr(), meta.uid(), meta.gid());
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(not(unix))]
+    fn apply_owner_from_path(&self, _source: &Path, _target: &Path) -> std::io::Result<()> {
+        Ok(())
+    }
+
+    #[cfg(not(unix))]
+    fn apply_metadata(&self, _target: &Path, _source: &Path) -> std::io::Result<()> {
+        Ok(())
     }
 }

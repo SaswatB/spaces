@@ -180,9 +180,15 @@ pub async fn system_status(State(state): State<AppState>) -> impl IntoResponse {
     tag = "system"
 )]
 pub async fn system_remount(State(state): State<AppState>) -> impl IntoResponse {
-    let service = SpacesService::new(&state);
-    match service.remount_all() {
-        Ok(()) => StatusCode::OK.into_response(),
+    let state = state.clone();
+    match tokio::task::spawn_blocking(move || {
+        let service = SpacesService::new(&state);
+        service.remount_all()
+    })
+    .await
+    {
+        Ok(Ok(())) => StatusCode::OK.into_response(),
+        Ok(Err(err)) => error_response(&err.to_string()),
         Err(err) => error_response(&err.to_string()),
     }
 }
@@ -240,9 +246,17 @@ pub async fn create_entrypoint(
     State(state): State<AppState>,
     Json(payload): Json<CreateEntrypointRequest>,
 ) -> impl IntoResponse {
-    let service = SpacesService::new(&state);
-    match service.create_entrypoint(payload.name, payload.path) {
-        Ok(entrypoint) => (StatusCode::CREATED, Json(entrypoint)).into_response(),
+    let state = state.clone();
+    let name = payload.name;
+    let path = payload.path;
+    match tokio::task::spawn_blocking(move || {
+        let service = SpacesService::new(&state);
+        service.create_entrypoint(name, path)
+    })
+    .await
+    {
+        Ok(Ok(entrypoint)) => (StatusCode::CREATED, Json(entrypoint)).into_response(),
+        Ok(Err(err)) => error_response(&err.to_string()),
         Err(err) => error_response(&err.to_string()),
     }
 }
@@ -263,9 +277,15 @@ pub async fn delete_entrypoint(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> impl IntoResponse {
-    let service = SpacesService::new(&state);
-    match service.delete_entrypoint(id) {
-        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+    let state = state.clone();
+    match tokio::task::spawn_blocking(move || {
+        let service = SpacesService::new(&state);
+        service.delete_entrypoint(id)
+    })
+    .await
+    {
+        Ok(Ok(())) => StatusCode::NO_CONTENT.into_response(),
+        Ok(Err(err)) => error_response(&err.to_string()),
         Err(err) => error_response(&err.to_string()),
     }
 }
@@ -345,15 +365,21 @@ pub async fn create_layer(
     State(state): State<AppState>,
     Json(payload): Json<CreateLayerRequest>,
 ) -> impl IntoResponse {
-    let service = SpacesService::new(&state);
-    match service.create_layer(
-        payload.name,
-        payload.entrypoint_id,
-        payload.parent_id,
-        payload.mount_path,
-    ) {
-        Ok(layer) => (StatusCode::CREATED, Json(layer_response(layer, MountStatus::Unmounted)))
-            .into_response(),
+    let state = state.clone();
+    let name = payload.name;
+    let entrypoint_id = payload.entrypoint_id;
+    let parent_id = payload.parent_id;
+    let mount_path = payload.mount_path;
+    match tokio::task::spawn_blocking(move || {
+        let service = SpacesService::new(&state);
+        service.create_layer(name, entrypoint_id, parent_id, mount_path)
+    })
+    .await
+    {
+        Ok(Ok(layer)) => {
+            (StatusCode::CREATED, Json(layer_response(layer, MountStatus::Unmounted))).into_response()
+        }
+        Ok(Err(err)) => error_response(&err.to_string()),
         Err(err) => error_response(&err.to_string()),
     }
 }
@@ -373,9 +399,15 @@ pub async fn delete_layer(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> impl IntoResponse {
-    let service = SpacesService::new(&state);
-    match service.delete_layer(id) {
-        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+    let state = state.clone();
+    match tokio::task::spawn_blocking(move || {
+        let service = SpacesService::new(&state);
+        service.delete_layer(id)
+    })
+    .await
+    {
+        Ok(Ok(())) => StatusCode::NO_CONTENT.into_response(),
+        Ok(Err(err)) => error_response(&err.to_string()),
         Err(err) => error_response(&err.to_string()),
     }
 }
@@ -395,13 +427,22 @@ pub async fn mount_layer(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> impl IntoResponse {
-    let service = SpacesService::new(&state);
-    match service.get_layer(id) {
-        Ok(Some(layer)) => match service.mount_layer(&layer) {
-            Ok(()) => StatusCode::OK.into_response(),
-            Err(err) => error_response(&err.to_string()),
-        },
-        Ok(None) => StatusCode::NOT_FOUND.into_response(),
+    let state = state.clone();
+    match tokio::task::spawn_blocking(move || -> anyhow::Result<Option<()>> {
+        let service = SpacesService::new(&state);
+        match service.get_layer(id)? {
+            Some(layer) => {
+                service.mount_layer(&layer)?;
+                Ok(Some(()))
+            }
+            None => Ok(None),
+        }
+    })
+    .await
+    {
+        Ok(Ok(Some(()))) => StatusCode::OK.into_response(),
+        Ok(Ok(None)) => StatusCode::NOT_FOUND.into_response(),
+        Ok(Err(err)) => error_response(&err.to_string()),
         Err(err) => error_response(&err.to_string()),
     }
 }
@@ -421,13 +462,22 @@ pub async fn unmount_layer(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> impl IntoResponse {
-    let service = SpacesService::new(&state);
-    match service.get_layer(id) {
-        Ok(Some(layer)) => match service.unmount_layer(&layer) {
-            Ok(()) => StatusCode::OK.into_response(),
-            Err(err) => error_response(&err.to_string()),
-        },
-        Ok(None) => StatusCode::NOT_FOUND.into_response(),
+    let state = state.clone();
+    match tokio::task::spawn_blocking(move || -> anyhow::Result<Option<()>> {
+        let service = SpacesService::new(&state);
+        match service.get_layer(id)? {
+            Some(layer) => {
+                service.unmount_layer(&layer)?;
+                Ok(Some(()))
+            }
+            None => Ok(None),
+        }
+    })
+    .await
+    {
+        Ok(Ok(Some(()))) => StatusCode::OK.into_response(),
+        Ok(Ok(None)) => StatusCode::NOT_FOUND.into_response(),
+        Ok(Err(err)) => error_response(&err.to_string()),
         Err(err) => error_response(&err.to_string()),
     }
 }
@@ -507,14 +557,18 @@ pub async fn create_user_mount(
     State(state): State<AppState>,
     Json(payload): Json<CreateUserMountRequest>,
 ) -> impl IntoResponse {
-    let service = SpacesService::new(&state);
-    match service.create_user_mount(
-        payload.name,
-        payload.entrypoint_id,
-        payload.mount_path,
-        payload.attached_layer_id,
-    ) {
-        Ok(user_mount) => (
+    let state = state.clone();
+    let name = payload.name;
+    let entrypoint_id = payload.entrypoint_id;
+    let mount_path = payload.mount_path;
+    let attached_layer_id = payload.attached_layer_id;
+    match tokio::task::spawn_blocking(move || {
+        let service = SpacesService::new(&state);
+        service.create_user_mount(name, entrypoint_id, mount_path, attached_layer_id)
+    })
+    .await
+    {
+        Ok(Ok(user_mount)) => (
             StatusCode::CREATED,
             Json(user_mount_response(
                 user_mount,
@@ -523,6 +577,7 @@ pub async fn create_user_mount(
             )),
         )
             .into_response(),
+        Ok(Err(err)) => error_response(&err.to_string()),
         Err(err) => error_response(&err.to_string()),
     }
 }
@@ -542,9 +597,15 @@ pub async fn delete_user_mount(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> impl IntoResponse {
-    let service = SpacesService::new(&state);
-    match service.delete_user_mount(id) {
-        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+    let state = state.clone();
+    match tokio::task::spawn_blocking(move || {
+        let service = SpacesService::new(&state);
+        service.delete_user_mount(id)
+    })
+    .await
+    {
+        Ok(Ok(())) => StatusCode::NO_CONTENT.into_response(),
+        Ok(Err(err)) => error_response(&err.to_string()),
         Err(err) => error_response(&err.to_string()),
     }
 }
@@ -564,13 +625,22 @@ pub async fn mount_user_mount(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> impl IntoResponse {
-    let service = SpacesService::new(&state);
-    match service.get_user_mount(id) {
-        Ok(Some(user_mount)) => match service.mount_user_mount(&user_mount) {
-            Ok(()) => StatusCode::OK.into_response(),
-            Err(err) => error_response(&err.to_string()),
-        },
-        Ok(None) => StatusCode::NOT_FOUND.into_response(),
+    let state = state.clone();
+    match tokio::task::spawn_blocking(move || -> anyhow::Result<Option<()>> {
+        let service = SpacesService::new(&state);
+        match service.get_user_mount(id)? {
+            Some(user_mount) => {
+                service.mount_user_mount(&user_mount)?;
+                Ok(Some(()))
+            }
+            None => Ok(None),
+        }
+    })
+    .await
+    {
+        Ok(Ok(Some(()))) => StatusCode::OK.into_response(),
+        Ok(Ok(None)) => StatusCode::NOT_FOUND.into_response(),
+        Ok(Err(err)) => error_response(&err.to_string()),
         Err(err) => error_response(&err.to_string()),
     }
 }
@@ -590,13 +660,22 @@ pub async fn unmount_user_mount(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> impl IntoResponse {
-    let service = SpacesService::new(&state);
-    match service.get_user_mount(id) {
-        Ok(Some(user_mount)) => match service.unmount_user_mount(&user_mount) {
-            Ok(()) => StatusCode::OK.into_response(),
-            Err(err) => error_response(&err.to_string()),
-        },
-        Ok(None) => StatusCode::NOT_FOUND.into_response(),
+    let state = state.clone();
+    match tokio::task::spawn_blocking(move || -> anyhow::Result<Option<()>> {
+        let service = SpacesService::new(&state);
+        match service.get_user_mount(id)? {
+            Some(user_mount) => {
+                service.unmount_user_mount(&user_mount)?;
+                Ok(Some(()))
+            }
+            None => Ok(None),
+        }
+    })
+    .await
+    {
+        Ok(Ok(Some(()))) => StatusCode::OK.into_response(),
+        Ok(Ok(None)) => StatusCode::NOT_FOUND.into_response(),
+        Ok(Err(err)) => error_response(&err.to_string()),
         Err(err) => error_response(&err.to_string()),
     }
 }
@@ -614,9 +693,17 @@ pub async fn attach_layer(
     State(state): State<AppState>,
     Json(payload): Json<AttachLayerRequest>,
 ) -> impl IntoResponse {
-    let service = SpacesService::new(&state);
-    match service.attach_layer(payload.user_mount_id, payload.layer_id) {
-        Ok(()) => StatusCode::OK.into_response(),
+    let state = state.clone();
+    let user_mount_id = payload.user_mount_id;
+    let layer_id = payload.layer_id;
+    match tokio::task::spawn_blocking(move || {
+        let service = SpacesService::new(&state);
+        service.attach_layer(user_mount_id, layer_id)
+    })
+    .await
+    {
+        Ok(Ok(())) => StatusCode::OK.into_response(),
+        Ok(Err(err)) => error_response(&err.to_string()),
         Err(err) => error_response(&err.to_string()),
     }
 }

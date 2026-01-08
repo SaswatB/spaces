@@ -52,14 +52,28 @@ impl NfsRegistry {
 pub async fn serve(_state: AppState) -> Result<JoinHandle<()>> {
     let state = _state.clone();
     let addr = format!("{}:{}", _state.config.nfs_host, _state.config.nfs_port);
-    let handle = tokio::spawn(async move {
-        tracing::info!("NFS server listening on {}", addr);
-        let server = SpacesNfs::new(state);
-        if let Err(err) = server.serve(&addr).await {
-            tracing::error!(?err, "NFS server stopped");
-        }
+    let thread_handle = std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build();
+        let Ok(runtime) = runtime else {
+            tracing::error!("Failed to create NFS runtime");
+            return;
+        };
+        runtime.block_on(async move {
+            tracing::info!("NFS server listening on {}", addr);
+            let server = SpacesNfs::new(state.clone());
+            if let Err(err) = server.serve(&addr).await {
+                tracing::error!(?err, "NFS server stopped");
+            }
+        });
     });
-    Ok(handle)
+
+    let join_handle = tokio::task::spawn_blocking(move || {
+        let _ = thread_handle.join();
+    });
+
+    Ok(join_handle)
 }
 
 pub fn handle_op(state: &AppState, op: NfsOp) -> Result<()> {

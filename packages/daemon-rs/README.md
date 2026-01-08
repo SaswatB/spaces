@@ -22,7 +22,7 @@ Mount operations map these export paths to the local mount paths stored in the d
 - `SPACES_DATA_DIR` (default `/var/lib/spaces`)
 - `SPACES_DB_PATH` (default `${SPACES_DATA_DIR}/spaces.db`)
 - `SPACES_API_HOST` / `SPACES_API_PORT` (default `127.0.0.1:3100`)
-- `SPACES_NFS_HOST` / `SPACES_NFS_PORT` (default `127.0.0.1:2049`)
+- `SPACES_NFS_HOST` / `SPACES_NFS_PORT` (default `127.0.0.1:11111`)
 - `SPACES_NFS_EXPORT_ROOT` (default `/spaces`)
 - `SPACES_AUTH_TOKEN` (optional)
 
