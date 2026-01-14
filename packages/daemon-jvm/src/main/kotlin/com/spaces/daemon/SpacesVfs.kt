@@ -101,7 +101,8 @@ class SpacesVfs(
             NodeKind.LAYER_ROOT, NodeKind.MOUNT_ROOT, NodeKind.OVERLAY -> {
                 val mount = resolved.mountView ?: throw NoEntException()
                 val relative = resolveChildRelative(resolved, path)
-                val resolvedPath = overlay.resolvePath(mount.view, relative) ?: throw NoEntException()
+                val resolvedPath =
+                        overlay.resolvePath(mount.view, relative) ?: throw NoEntException()
                 inodeForResolvedPath(resolved.mountPath, relative, resolvedPath.source)
             }
             else -> throw NoEntException()
@@ -424,6 +425,9 @@ class SpacesVfs(
     }
 
     override fun setattr(inode: Inode, stat: Stat) {
+        if (!stat.isDefined(Stat.StatAttribute.SIZE) && !stat.isDefined(Stat.StatAttribute.MODE))
+                return
+
         val resolved = resolveNode(inode)
         requireKnown(resolved)
         val mount = resolved.mountView ?: throw NoEntException()
@@ -511,12 +515,14 @@ class SpacesVfs(
     }
 
     private fun handleForPath(path: Path, followLinks: Boolean): ByteArray {
-        val key = stableKeyForPath(path, followLinks) ?: path.toAbsolutePath().normalize().toString()
+        val key =
+                stableKeyForPath(path, followLinks) ?: path.toAbsolutePath().normalize().toString()
         return hashBytes("file:$key")
     }
 
     private fun stableFileId(path: Path, followLinks: Boolean): Long {
-        val key = stableKeyForPath(path, followLinks) ?: path.toAbsolutePath().normalize().toString()
+        val key =
+                stableKeyForPath(path, followLinks) ?: path.toAbsolutePath().normalize().toString()
         return fileIdForKey("file:$key")
     }
 
