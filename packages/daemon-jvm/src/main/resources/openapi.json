@@ -1,0 +1,1031 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "spaces-daemon",
+    "description": "",
+    "license": {
+      "name": ""
+    },
+    "version": "0.1.0"
+  },
+  "paths": {
+    "/entrypoints": {
+      "get": {
+        "tags": [
+          "entrypoints"
+        ],
+        "operationId": "list_entrypoints",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Entrypoint"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "entrypoints"
+        ],
+        "operationId": "create_entrypoint",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateEntrypointRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Entrypoint"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/entrypoints/{id}": {
+      "get": {
+        "tags": [
+          "entrypoints"
+        ],
+        "operationId": "get_entrypoint",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Entrypoint ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Entrypoint"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": ""
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "entrypoints"
+        ],
+        "operationId": "delete_entrypoint",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Entrypoint ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": ""
+          },
+          "400": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/layers": {
+      "get": {
+        "tags": [
+          "layers"
+        ],
+        "operationId": "list_layers",
+        "parameters": [
+          {
+            "name": "entrypointId",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/LayerResponse"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "layers"
+        ],
+        "operationId": "create_layer",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateLayerRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LayerResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/layers/{id}": {
+      "get": {
+        "tags": [
+          "layers"
+        ],
+        "operationId": "get_layer",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Layer ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LayerResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": ""
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "layers"
+        ],
+        "operationId": "delete_layer",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Layer ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": ""
+          }
+        }
+      }
+    },
+    "/layers/{id}/diff": {
+      "get": {
+        "tags": [
+          "layers"
+        ],
+        "operationId": "layer_diff",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Layer ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/LayerDiffEntry"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/layers/{id}/mount": {
+      "post": {
+        "tags": [
+          "layers"
+        ],
+        "operationId": "mount_layer",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Layer ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": ""
+          }
+        }
+      }
+    },
+    "/layers/{id}/unmount": {
+      "post": {
+        "tags": [
+          "layers"
+        ],
+        "operationId": "unmount_layer",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Layer ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": ""
+          }
+        }
+      }
+    },
+    "/system/remount": {
+      "post": {
+        "tags": [
+          "system"
+        ],
+        "operationId": "system_remount",
+        "responses": {
+          "200": {
+            "description": ""
+          }
+        }
+      }
+    },
+    "/system/status": {
+      "get": {
+        "tags": [
+          "system"
+        ],
+        "operationId": "system_status",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StatusResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/user-mounts": {
+      "get": {
+        "tags": [
+          "user-mounts"
+        ],
+        "operationId": "list_user_mounts",
+        "parameters": [
+          {
+            "name": "entrypointId",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/UserMountResponse"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "user-mounts"
+        ],
+        "operationId": "create_user_mount",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateUserMountRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserMountResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/user-mounts/attach": {
+      "post": {
+        "tags": [
+          "user-mounts"
+        ],
+        "operationId": "attach_layer",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AttachLayerRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": ""
+          }
+        }
+      }
+    },
+    "/user-mounts/{id}": {
+      "get": {
+        "tags": [
+          "user-mounts"
+        ],
+        "operationId": "get_user_mount",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "User mount ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserMountResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": ""
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "user-mounts"
+        ],
+        "operationId": "delete_user_mount",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "User mount ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": ""
+          }
+        }
+      }
+    },
+    "/user-mounts/{id}/mount": {
+      "post": {
+        "tags": [
+          "user-mounts"
+        ],
+        "operationId": "mount_user_mount",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "User mount ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": ""
+          }
+        }
+      }
+    },
+    "/user-mounts/{id}/unmount": {
+      "post": {
+        "tags": [
+          "user-mounts"
+        ],
+        "operationId": "unmount_user_mount",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "User mount ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": ""
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "AttachLayerRequest": {
+        "type": "object",
+        "required": [
+          "userMountId"
+        ],
+        "properties": {
+          "layerId": {
+            "type": "string",
+            "nullable": true
+          },
+          "userMountId": {
+            "type": "string"
+          }
+        }
+      },
+      "CreateEntrypointRequest": {
+        "type": "object",
+        "required": [
+          "path"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "nullable": true
+          },
+          "path": {
+            "type": "string"
+          }
+        }
+      },
+      "CreateLayerRequest": {
+        "type": "object",
+        "required": [
+          "entrypointId"
+        ],
+        "properties": {
+          "entrypointId": {
+            "type": "string"
+          },
+          "mountPath": {
+            "type": "string",
+            "nullable": true
+          },
+          "name": {
+            "type": "string",
+            "nullable": true
+          },
+          "parentId": {
+            "type": "string",
+            "nullable": true
+          }
+        }
+      },
+      "CreateUserMountRequest": {
+        "type": "object",
+        "required": [
+          "name",
+          "entrypointId",
+          "mountPath"
+        ],
+        "properties": {
+          "attachedLayerId": {
+            "type": "string",
+            "nullable": true
+          },
+          "entrypointId": {
+            "type": "string"
+          },
+          "mountPath": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          }
+        }
+      },
+      "Entrypoint": {
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "path",
+          "createdAt",
+          "updatedAt"
+        ],
+        "properties": {
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          },
+          "updatedAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "FileChange": {
+        "type": "object",
+        "required": [
+          "changeType",
+          "relativePath",
+          "timestamp",
+          "sourceUid",
+          "sourceGid"
+        ],
+        "properties": {
+          "changeType": {
+            "$ref": "#/components/schemas/FileChangeType"
+          },
+          "relativePath": {
+            "type": "string"
+          },
+          "sourceGid": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "sourceUid": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "timestamp": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "FileChangeType": {
+        "type": "string",
+        "enum": [
+          "add",
+          "modify",
+          "delete"
+        ]
+      },
+      "HealthResponse": {
+        "type": "object",
+        "required": [
+          "status"
+        ],
+        "properties": {
+          "status": {
+            "type": "string"
+          }
+        }
+      },
+      "Layer": {
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "entrypointId",
+          "upperDir",
+          "workDir",
+          "mountPath",
+          "createdAt",
+          "updatedAt"
+        ],
+        "properties": {
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "entrypointId": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "mountPath": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "parentId": {
+            "type": "string",
+            "nullable": true
+          },
+          "updatedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "upperDir": {
+            "type": "string"
+          },
+          "workDir": {
+            "type": "string"
+          }
+        }
+      },
+      "LayerDiffEntry": {
+        "type": "object",
+        "required": [
+          "path",
+          "changeType"
+        ],
+        "properties": {
+          "changeType": {
+            "$ref": "#/components/schemas/LayerDiffType"
+          },
+          "path": {
+            "type": "string"
+          }
+        }
+      },
+      "LayerDiffType": {
+        "type": "string",
+        "enum": [
+          "add",
+          "modify",
+          "delete"
+        ]
+      },
+      "LayerResponse": {
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "entrypointId",
+          "upperDir",
+          "workDir",
+          "mountPath",
+          "mountStatus",
+          "createdAt",
+          "updatedAt"
+        ],
+        "properties": {
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "entrypointId": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "mountPath": {
+            "type": "string"
+          },
+          "mountStatus": {
+            "$ref": "#/components/schemas/MountStatus"
+          },
+          "name": {
+            "type": "string"
+          },
+          "parentId": {
+            "type": "string",
+            "nullable": true
+          },
+          "updatedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "upperDir": {
+            "type": "string"
+          },
+          "workDir": {
+            "type": "string"
+          }
+        }
+      },
+      "ListQuery": {
+        "type": "object",
+        "properties": {
+          "entrypointId": {
+            "type": "string",
+            "nullable": true
+          }
+        }
+      },
+      "MountStatus": {
+        "type": "string",
+        "enum": [
+          "mounted",
+          "unmounted",
+          "error"
+        ]
+      },
+      "StatusResponse": {
+        "type": "object",
+        "required": [
+          "entrypointCount",
+          "layerCount",
+          "userMountCount",
+          "mountedLayers",
+          "mountedUserMounts"
+        ],
+        "properties": {
+          "entrypointCount": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "layerCount": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "mountedLayers": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "mountedUserMounts": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "userMountCount": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      },
+      "SyncState": {
+        "type": "object",
+        "required": [
+          "userMountId",
+          "status",
+          "pendingChanges"
+        ],
+        "properties": {
+          "error": {
+            "type": "string",
+            "nullable": true
+          },
+          "lastSyncedAt": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "pendingChanges": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/FileChange"
+            }
+          },
+          "status": {
+            "$ref": "#/components/schemas/SyncStatus"
+          },
+          "userMountId": {
+            "type": "string"
+          }
+        }
+      },
+      "SyncStatus": {
+        "type": "string",
+        "enum": [
+          "idle",
+          "syncing",
+          "error"
+        ]
+      },
+      "UserMount": {
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "entrypointId",
+          "upperDir",
+          "workDir",
+          "mountPath",
+          "createdAt",
+          "updatedAt"
+        ],
+        "properties": {
+          "attachedLayerId": {
+            "type": "string",
+            "nullable": true
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "entrypointId": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "mountPath": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "updatedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "upperDir": {
+            "type": "string"
+          },
+          "workDir": {
+            "type": "string"
+          }
+        }
+      },
+      "UserMountResponse": {
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "entrypointId",
+          "upperDir",
+          "workDir",
+          "mountPath",
+          "mountStatus",
+          "createdAt",
+          "updatedAt"
+        ],
+        "properties": {
+          "attachedLayerId": {
+            "type": "string",
+            "nullable": true
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "entrypointId": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "mountPath": {
+            "type": "string"
+          },
+          "mountStatus": {
+            "$ref": "#/components/schemas/MountStatus"
+          },
+          "name": {
+            "type": "string"
+          },
+          "syncState": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/SyncState"
+              }
+            ],
+            "nullable": true
+          },
+          "updatedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "upperDir": {
+            "type": "string"
+          },
+          "workDir": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  },
+  "tags": [
+    {
+      "name": "system"
+    },
+    {
+      "name": "entrypoints"
+    },
+    {
+      "name": "layers"
+    },
+    {
+      "name": "user-mounts"
+    }
+  ]
+}
