@@ -4,6 +4,7 @@ import java.io.IOException
 import java.nio.ByteBuffer
 import java.nio.channels.FileChannel
 import java.nio.file.*
+import java.nio.file.attribute.BasicFileAttributes
 import java.nio.file.attribute.PosixFileAttributes
 import java.nio.file.attribute.PosixFilePermission
 import java.nio.file.attribute.PosixFilePermissions
@@ -35,9 +36,8 @@ class SpacesVfs(
     private val logger = LoggerFactory.getLogger(SpacesVfs::class.java)
     private val overlay = OverlayEngine()
     private val idMapping = SimpleIdMapping()
-    private val inodeCache = ConcurrentHashMap<String, Inode>()
-    private val pathToHandle = ConcurrentHashMap<String, ByteArray>()
     private val handleToPath = ConcurrentHashMap<String, String>()
+    private val handleToInode = ConcurrentHashMap<String, Inode>()
 
     override fun access(inode: Inode, mode: Int): Int {
         val resolved = resolveNode(inode)
@@ -73,12 +73,12 @@ class SpacesVfs(
         }
         overlay.applyEntrypointOwner(mount.view, target)
         emitOp(mount, relative, NfsOpKind.Create)
-        return inodeForPath(resolved.mountPath, relative)
+        return inodeForResolvedPath(resolved.mountPath, relative, target)
     }
 
     override fun getFsStat(): FsStat = FsStat(0, 0, 0, 0)
 
-    override fun getRootInode(): Inode = inodeForPath("/", "")
+    override fun getRootInode(): Inode = inodeForVirtualPath("/", "")
 
     override fun lookup(parent: Inode, path: String): Inode {
         val resolved = resolveNode(parent)
@@ -86,23 +86,23 @@ class SpacesVfs(
         return when (resolved.kind) {
             NodeKind.EXPORT_ROOT ->
                     when (path) {
-                        "layers" -> inodeForPath("/", "layers")
-                        "mounts" -> inodeForPath("/", "mounts")
+                        "layers" -> inodeForVirtualPath("/", "layers")
+                        "mounts" -> inodeForVirtualPath("/", "mounts")
                         else -> throw NoEntException()
                     }
             NodeKind.LAYERS_DIR -> {
                 if (db.getLayer(path) == null) throw NoEntException()
-                inodeForPath("/", prefixPath("layers/$path"))
+                inodeForVirtualPath("/", prefixPath("layers/$path"))
             }
             NodeKind.MOUNTS_DIR -> {
                 if (db.getUserMount(path) == null) throw NoEntException()
-                inodeForPath("/", prefixPath("mounts/$path"))
+                inodeForVirtualPath("/", prefixPath("mounts/$path"))
             }
             NodeKind.LAYER_ROOT, NodeKind.MOUNT_ROOT, NodeKind.OVERLAY -> {
                 val mount = resolved.mountView ?: throw NoEntException()
                 val relative = resolveChildRelative(resolved, path)
-                overlay.resolvePath(mount.view, relative) ?: throw NoEntException()
-                inodeForPath(resolved.mountPath, relative)
+                val resolvedPath = overlay.resolvePath(mount.view, relative) ?: throw NoEntException()
+                inodeForResolvedPath(resolved.mountPath, relative, resolvedPath.source)
             }
             else -> throw NoEntException()
         }
@@ -131,7 +131,7 @@ class SpacesVfs(
         Files.createLink(targetPath, sourcePath)
         overlay.applyEntrypointOwner(mount.view, targetPath)
         emitOp(mount, targetRel, NfsOpKind.Create)
-        return inodeForPath(parentResolved.mountPath, targetRel)
+        return inodeForResolvedPath(parentResolved.mountPath, targetRel, targetPath)
     }
 
     override fun list(dir: Inode, verifier: ByteArray, cookie: Long): NfsDirectoryStream {
@@ -175,7 +175,42 @@ class SpacesVfs(
         }
     }
 
-    override fun directoryVerifier(dir: Inode): ByteArray = NfsDirectoryStream.ZERO_VERIFIER
+    override fun directoryVerifier(dir: Inode): ByteArray {
+        val resolved = resolveNode(dir)
+        requireKnown(resolved)
+        return try {
+            when (resolved.kind) {
+                NodeKind.EXPORT_ROOT -> verifierFromString("export_root")
+                NodeKind.LAYERS_DIR -> verifierFromEntries(db.listLayerIds())
+                NodeKind.MOUNTS_DIR -> verifierFromEntries(db.listUserMountIds())
+                NodeKind.LAYER_ROOT, NodeKind.MOUNT_ROOT, NodeKind.OVERLAY -> {
+                    val mount = resolved.mountView ?: return NfsDirectoryStream.ZERO_VERIFIER
+                    val rel = resolved.relativePath
+                    val candidates = ArrayList<String>()
+                    val roots = mount.view.layers + mount.view.entrypoint
+                    for (root in roots) {
+                        val dir = root.resolve(rel)
+                        if (!Files.exists(dir, LinkOption.NOFOLLOW_LINKS)) continue
+                        val attrs =
+                                Files.readAttributes(
+                                        dir,
+                                        BasicFileAttributes::class.java,
+                                        LinkOption.NOFOLLOW_LINKS
+                                )
+                        val key = stableKeyForPath(dir, followLinks = false)
+                        candidates.add(
+                                "dir:${key ?: dir}:${attrs.lastModifiedTime().toMillis()}:${attrs.size()}"
+                        )
+                    }
+                    if (candidates.isEmpty()) NfsDirectoryStream.ZERO_VERIFIER
+                    else verifierFromString(candidates.sorted().joinToString("|"))
+                }
+                else -> NfsDirectoryStream.ZERO_VERIFIER
+            }
+        } catch (_: Exception) {
+            NfsDirectoryStream.ZERO_VERIFIER
+        }
+    }
 
     override fun mkdir(parent: Inode, name: String, subject: Subject, mode: Int): Inode {
         val resolved = resolveNode(parent)
@@ -189,7 +224,7 @@ class SpacesVfs(
         overlay.applyEntrypointOwner(mount.view, target)
         overlay.markOpaque(mount.view, relative)
         emitOp(mount, relative, NfsOpKind.Mkdir)
-        return inodeForPath(resolved.mountPath, relative)
+        return inodeForResolvedPath(resolved.mountPath, relative, target)
     }
 
     override fun move(from: Inode, oldName: String, to: Inode, newName: String): Boolean {
@@ -208,6 +243,7 @@ class SpacesVfs(
         val source = topUpper.resolve(fromRel)
         val target = topUpper.resolve(toRel)
         Files.move(source, target, StandardCopyOption.REPLACE_EXISTING)
+        updateHandlePathsForMove(fromResolved.mountPath, fromRel, toRel)
         emitOp(mount, fromRel, NfsOpKind.Rename)
         return true
     }
@@ -216,19 +252,25 @@ class SpacesVfs(
         val resolved = resolveNode(inode)
         requireKnown(resolved)
         return when (resolved.kind) {
-            NodeKind.EXPORT_ROOT -> inodeForPath("/", "")
-            NodeKind.LAYERS_DIR, NodeKind.MOUNTS_DIR -> inodeForPath("/", "")
-            NodeKind.LAYER_ROOT -> inodeForPath("/", prefixPath("layers"))
-            NodeKind.MOUNT_ROOT -> inodeForPath("/", prefixPath("mounts"))
+            NodeKind.EXPORT_ROOT -> inodeForVirtualPath("/", "")
+            NodeKind.LAYERS_DIR, NodeKind.MOUNTS_DIR -> inodeForVirtualPath("/", "")
+            NodeKind.LAYER_ROOT -> inodeForVirtualPath("/", prefixPath("layers"))
+            NodeKind.MOUNT_ROOT -> inodeForVirtualPath("/", prefixPath("mounts"))
             NodeKind.OVERLAY -> {
-                if (resolved.relativePath.isEmpty()) {
-                    inodeForPath(resolved.mountPath, "")
+                val mount = resolved.mountView ?: throw NoEntException()
+                val parentRel = Paths.get(resolved.relativePath).parent?.toString() ?: ""
+                if (parentRel.isEmpty()) {
+                    inodeForVirtualPath(resolved.mountPath, "")
                 } else {
-                    val parentRel = Paths.get(resolved.relativePath).parent?.toString() ?: ""
-                    inodeForPath(resolved.mountPath, parentRel)
+                    val parentPath = overlay.resolvePath(mount.view, parentRel)
+                    if (parentPath != null) {
+                        inodeForResolvedPath(resolved.mountPath, parentRel, parentPath.source)
+                    } else {
+                        inodeForVirtualPath(resolved.mountPath, parentRel)
+                    }
                 }
             }
-            else -> inodeForPath("/", "")
+            else -> inodeForVirtualPath("/", "")
         }
     }
 
@@ -305,7 +347,7 @@ class SpacesVfs(
         Files.createSymbolicLink(linkPath, Paths.get(target))
         overlay.applyEntrypointOwner(mount.view, linkPath)
         emitOp(mount, rel, NfsOpKind.Create)
-        return inodeForPath(resolved.mountPath, rel)
+        return inodeForResolvedPath(resolved.mountPath, rel, linkPath)
     }
 
     override fun write(
@@ -419,15 +461,26 @@ class SpacesVfs(
 
     override fun getIdMapper(): NfsIdMapping = idMapping
 
-    private fun inodeForPath(root: String, relative: String): Inode {
+    private fun inodeForVirtualPath(root: String, relative: String): Inode {
         val path =
                 if (relative.isBlank()) root else root.trimEnd('/') + "/" + relative.trimStart('/')
-        return inodeCache.computeIfAbsent(path) {
-            val handleBytes = pathToHandle.computeIfAbsent(path) { hashPath(path) }
-            val handleKey = handleKey(handleBytes)
-            handleToPath.putIfAbsent(handleKey, path)
-            Inode.forFile(handleBytes)
-        }
+        val handleBytes = hashBytes("virtual:$path")
+        return inodeForHandle(handleBytes, path)
+    }
+
+    private fun inodeForResolvedPath(root: String, relative: String, sourcePath: Path?): Inode {
+        val path =
+                if (relative.isBlank()) root else root.trimEnd('/') + "/" + relative.trimStart('/')
+        val handleBytes =
+                if (sourcePath != null) handleForPath(sourcePath, followLinks = false)
+                else hashBytes("virtual:$path")
+        return inodeForHandle(handleBytes, path)
+    }
+
+    private fun inodeForHandle(handleBytes: ByteArray, path: String): Inode {
+        val handleKey = handleKey(handleBytes)
+        handleToPath[handleKey] = path
+        return handleToInode.computeIfAbsent(handleKey) { Inode.forFile(handleBytes) }
     }
 
     private fun pathFor(inode: Inode): String {
@@ -435,13 +488,13 @@ class SpacesVfs(
         return handleToPath[handleKey] ?: ""
     }
 
-    private fun hashPath(path: String): ByteArray {
+    private fun hashBytes(value: String): ByteArray {
         val digest = MessageDigest.getInstance("SHA-256")
-        return digest.digest(path.toByteArray(Charsets.UTF_8))
+        return digest.digest(value.toByteArray(Charsets.UTF_8))
     }
 
-    private fun fileIdForPath(path: String): Long {
-        val digest = hashPath(path)
+    private fun fileIdForKey(key: String): Long {
+        val digest = hashBytes(key)
         var value = 0L
         for (i in 0 until 8) {
             value = (value shl 8) or (digest[i].toLong() and 0xFF)
@@ -455,6 +508,60 @@ class SpacesVfs(
             sb.append(String.format("%02x", b))
         }
         return sb.toString()
+    }
+
+    private fun handleForPath(path: Path, followLinks: Boolean): ByteArray {
+        val key = stableKeyForPath(path, followLinks) ?: path.toAbsolutePath().normalize().toString()
+        return hashBytes("file:$key")
+    }
+
+    private fun stableFileId(path: Path, followLinks: Boolean): Long {
+        val key = stableKeyForPath(path, followLinks) ?: path.toAbsolutePath().normalize().toString()
+        return fileIdForKey("file:$key")
+    }
+
+    private fun stableKeyForPath(path: Path, followLinks: Boolean): String? {
+        val options =
+                if (followLinks) emptyArray<LinkOption>() else arrayOf(LinkOption.NOFOLLOW_LINKS)
+        try {
+            val dev = Files.getAttribute(path, "unix:dev", *options)
+            val ino = Files.getAttribute(path, "unix:ino", *options)
+            if (dev is Number && ino is Number) {
+                return "${dev.toLong()}:${ino.toLong()}"
+            }
+        } catch (_: Exception) {
+            // ignore
+        }
+        return try {
+            val attrs = Files.readAttributes(path, BasicFileAttributes::class.java, *options)
+            attrs.fileKey()?.toString()
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private fun updateHandlePathsForMove(root: String, fromRelative: String, toRelative: String) {
+        val oldPath =
+                if (fromRelative.isBlank()) root
+                else root.trimEnd('/') + "/" + fromRelative.trimStart('/')
+        val newPath =
+                if (toRelative.isBlank()) root
+                else root.trimEnd('/') + "/" + toRelative.trimStart('/')
+        handleToPath.forEach { (handleKey, path) ->
+            if (path == oldPath || path.startsWith("$oldPath/")) {
+                handleToPath[handleKey] = newPath + path.removePrefix(oldPath)
+            }
+        }
+    }
+
+    private fun verifierFromEntries(entries: List<String>): ByteArray {
+        val combined = entries.sorted().joinToString("\u0000")
+        return verifierFromString(combined)
+    }
+
+    private fun verifierFromString(value: String): ByteArray {
+        val hash = hashBytes(value)
+        return hash.copyOf(NfsDirectoryStream.ZERO_VERIFIER.size)
     }
 
     private fun resolveNode(inode: Inode): ResolvedNode {
@@ -577,7 +684,7 @@ class SpacesVfs(
         stat.setATime(now)
         stat.setMTime(now)
         stat.setCTime(now)
-        stat.setFileid(fileIdForPath(path))
+        stat.setFileid(fileIdForKey("virtual:$path"))
         stat.setGeneration(0)
         return stat
     }
@@ -598,7 +705,7 @@ class SpacesVfs(
         stat.setATime(attrs.lastAccessTime().toMillis())
         stat.setMTime(attrs.lastModifiedTime().toMillis())
         stat.setCTime(attrs.creationTime().toMillis())
-        stat.setFileid(fileIdForPath(exportPath))
+        stat.setFileid(fileIdForKey("virtual:$exportPath"))
         stat.setGeneration(0)
         return stat
     }
@@ -622,7 +729,7 @@ class SpacesVfs(
         stat.setATime(attrs.lastAccessTime().toMillis())
         stat.setMTime(attrs.lastModifiedTime().toMillis())
         stat.setCTime(attrs.creationTime().toMillis())
-        stat.setFileid(fileIdForPath(path.toString()))
+        stat.setFileid(stableFileId(path, followLinks = false))
         stat.setGeneration(0)
         return stat
     }
