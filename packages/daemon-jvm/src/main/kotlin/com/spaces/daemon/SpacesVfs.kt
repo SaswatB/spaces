@@ -7,13 +7,12 @@ import java.nio.file.*
 import java.nio.file.attribute.PosixFileAttributes
 import java.nio.file.attribute.PosixFilePermission
 import java.nio.file.attribute.PosixFilePermissions
+import java.security.MessageDigest
 import java.time.Instant
 import java.util.concurrent.ConcurrentHashMap
-import java.security.MessageDigest
 import javax.security.auth.Subject
 import kotlin.io.path.exists
 import org.dcache.nfs.status.ExistException
-import org.dcache.nfs.status.AttrNotSuppException
 import org.dcache.nfs.status.NoEntException
 import org.dcache.nfs.status.NotDirException
 import org.dcache.nfs.status.NotEmptyException
@@ -349,12 +348,16 @@ class SpacesVfs(
         requireKnown(resolved)
         return try {
             when (resolved.kind) {
-                NodeKind.EXPORT_ROOT,
-                NodeKind.LAYERS_DIR,
-                NodeKind.MOUNTS_DIR,
-                NodeKind.LAYER_ROOT,
-                NodeKind.MOUNT_ROOT -> {
+                NodeKind.EXPORT_ROOT, NodeKind.LAYERS_DIR, NodeKind.MOUNTS_DIR -> {
                     dirStat(resolved.path)
+                }
+                NodeKind.LAYER_ROOT, NodeKind.MOUNT_ROOT -> {
+                    val mount = resolved.mountView
+                    if (mount != null) {
+                        virtualDirStat(resolved.path, mount.view.entrypoint)
+                    } else {
+                        dirStat(resolved.path)
+                    }
                 }
                 NodeKind.OVERLAY -> {
                     val mount = resolved.mountView ?: throw NoEntException()
@@ -579,9 +582,35 @@ class SpacesVfs(
         return stat
     }
 
+    private fun virtualDirStat(exportPath: String, source: Path): Stat {
+        val stat = Stat()
+        val attrs =
+                Files.readAttributes(
+                        source,
+                        PosixFileAttributes::class.java,
+                        LinkOption.NOFOLLOW_LINKS
+                )
+        stat.setMode(Stat.S_IFDIR or permsToMode(attrs.permissions()))
+        stat.setNlink(2)
+        stat.setUid(readUnixId(source, "uid"))
+        stat.setGid(readUnixId(source, "gid"))
+        stat.setSize(attrs.size())
+        stat.setATime(attrs.lastAccessTime().toMillis())
+        stat.setMTime(attrs.lastModifiedTime().toMillis())
+        stat.setCTime(attrs.creationTime().toMillis())
+        stat.setFileid(fileIdForPath(exportPath))
+        stat.setGeneration(0)
+        return stat
+    }
+
     private fun fileStat(path: Path): Stat {
         val stat = Stat()
-        val attrs = Files.readAttributes(path, PosixFileAttributes::class.java, LinkOption.NOFOLLOW_LINKS)
+        val attrs =
+                Files.readAttributes(
+                        path,
+                        PosixFileAttributes::class.java,
+                        LinkOption.NOFOLLOW_LINKS
+                )
         val mode =
                 if (attrs.isDirectory) Stat.S_IFDIR
                 else if (attrs.isSymbolicLink) Stat.S_IFLNK else Stat.S_IFREG
