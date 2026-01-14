@@ -9,8 +9,11 @@ import java.nio.file.attribute.PosixFilePermission
 import java.nio.file.attribute.PosixFilePermissions
 import java.time.Instant
 import java.util.concurrent.ConcurrentHashMap
+import java.security.MessageDigest
 import javax.security.auth.Subject
 import kotlin.io.path.exists
+import org.dcache.nfs.status.ExistException
+import org.dcache.nfs.status.AttrNotSuppException
 import org.dcache.nfs.status.NoEntException
 import org.dcache.nfs.status.NotDirException
 import org.dcache.nfs.status.NotEmptyException
@@ -34,6 +37,8 @@ class SpacesVfs(
     private val overlay = OverlayEngine()
     private val idMapping = SimpleIdMapping()
     private val inodeCache = ConcurrentHashMap<String, Inode>()
+    private val pathToHandle = ConcurrentHashMap<String, ByteArray>()
+    private val handleToPath = ConcurrentHashMap<String, String>()
 
     override fun access(inode: Inode, mode: Int): Int {
         val resolved = resolveNode(inode)
@@ -55,13 +60,17 @@ class SpacesVfs(
         val topUpper = mount.view.layers.firstOrNull() ?: throw PermException()
         overlay.ensureParentDirs(mount.view, Paths.get(relative))
         val target = topUpper.resolve(relative)
-        when (type) {
-            Stat.Type.DIRECTORY -> Files.createDirectories(target)
-            Stat.Type.SYMLINK -> throw IOException("symlink create not supported via create")
-            else -> {
-                Files.createDirectories(target.parent)
-                Files.createFile(target)
+        try {
+            when (type) {
+                Stat.Type.DIRECTORY -> Files.createDirectory(target)
+                Stat.Type.SYMLINK -> throw IOException("symlink create not supported via create")
+                else -> {
+                    Files.createDirectories(target.parent)
+                    Files.createFile(target)
+                }
             }
+        } catch (_: FileAlreadyExistsException) {
+            throw ExistException()
         }
         overlay.applyEntrypointOwner(mount.view, target)
         emitOp(mount, relative, NfsOpKind.Create)
@@ -101,10 +110,32 @@ class SpacesVfs(
     }
 
     override fun link(parent: Inode, inode: Inode, name: String, subject: Subject): Inode {
-        throw IOException("link not supported")
+        val parentResolved = resolveNode(parent)
+        requireKnown(parentResolved)
+        val mount = parentResolved.mountView ?: throw NotDirException()
+        ensureWritable(mount)
+
+        val sourceResolved = resolveNode(inode)
+        requireKnown(sourceResolved)
+        val sourceMount = sourceResolved.mountView ?: throw NoEntException()
+        if (sourceMount.mountId != mount.mountId) throw PermException()
+        if (sourceResolved.kind != NodeKind.OVERLAY) throw PermException()
+
+        val sourceRel = sourceResolved.relativePath
+        val targetRel = resolveChildRelative(parentResolved, name)
+        val topUpper = mount.view.layers.firstOrNull() ?: throw PermException()
+        overlay.copyUpIfNeeded(mount.view, sourceRel)
+        overlay.ensureParentDirs(mount.view, Paths.get(targetRel))
+        val sourcePath = topUpper.resolve(sourceRel)
+        val targetPath = topUpper.resolve(targetRel)
+        if (Files.isDirectory(sourcePath)) throw PermException()
+        Files.createLink(targetPath, sourcePath)
+        overlay.applyEntrypointOwner(mount.view, targetPath)
+        emitOp(mount, targetRel, NfsOpKind.Create)
+        return inodeForPath(parentResolved.mountPath, targetRel)
     }
 
-    override fun list(dir: Inode, cookie: ByteArray, verifier: Long): NfsDirectoryStream {
+    override fun list(dir: Inode, verifier: ByteArray, cookie: Long): NfsDirectoryStream {
         val resolved = resolveNode(dir)
         requireKnown(resolved)
         try {
@@ -120,13 +151,18 @@ class SpacesVfs(
                         else -> throw NotDirException()
                     }
 
-            val dirEntries =
-                    entries.mapIndexed { index, name ->
-                        val inode = lookup(dir, name)
-                        val stat = getattr(inode)
-                        DirectoryEntry(name, inode, stat, index.toLong() + 1)
-                    }
-            return NfsDirectoryStream(dirEntries)
+            val dirEntries = ArrayList<DirectoryEntry>(entries.size)
+            var index = 0L
+            for (name in entries) {
+                index += 1
+                if (index <= cookie) {
+                    continue
+                }
+                val inode = lookup(dir, name)
+                val stat = getattr(inode)
+                dirEntries.add(DirectoryEntry(name, inode, stat, index))
+            }
+            return NfsDirectoryStream(verifier, dirEntries)
         } catch (error: Exception) {
             logger.warn(
                     "VFS list failed path={} kind={} rel={} mountId={}",
@@ -216,7 +252,16 @@ class SpacesVfs(
         val mount = resolved.mountView ?: throw NoEntException()
         val rel = resolved.relativePath
         val resolvedPath = overlay.resolvePath(mount.view, rel) ?: throw NoEntException()
-        return Files.readSymbolicLink(resolvedPath.source).toString()
+        val target = Files.readSymbolicLink(resolvedPath.source)
+        if (target.isAbsolute) {
+            val entrypoint = mount.view.entrypoint.normalize()
+            val normalizedTarget = target.normalize()
+            if (normalizedTarget.startsWith(entrypoint)) {
+                val relativeTarget = entrypoint.relativize(normalizedTarget)
+                return Paths.get(resolved.mountPath).resolve(relativeTarget).toString()
+            }
+        }
+        return target.toString()
     }
 
     override fun remove(parent: Inode, name: String) {
@@ -362,7 +407,7 @@ class SpacesVfs(
     override fun getAcl(inode: Inode): Array<nfsace4> = emptyArray()
 
     override fun setAcl(inode: Inode, acl: Array<nfsace4>) {
-        throw IOException("ACL not supported")
+        // Accept and ignore ACL updates; macOS clients often send these.
     }
 
     override fun hasIOLayout(inode: Inode): Boolean = false
@@ -374,11 +419,39 @@ class SpacesVfs(
     private fun inodeForPath(root: String, relative: String): Inode {
         val path =
                 if (relative.isBlank()) root else root.trimEnd('/') + "/" + relative.trimStart('/')
-        return inodeCache.computeIfAbsent(path) { Inode.forFile(path.toByteArray(Charsets.UTF_8)) }
+        return inodeCache.computeIfAbsent(path) {
+            val handleBytes = pathToHandle.computeIfAbsent(path) { hashPath(path) }
+            val handleKey = handleKey(handleBytes)
+            handleToPath.putIfAbsent(handleKey, path)
+            Inode.forFile(handleBytes)
+        }
     }
 
     private fun pathFor(inode: Inode): String {
-        return String(inode.fileId, Charsets.UTF_8)
+        val handleKey = handleKey(inode.fileId)
+        return handleToPath[handleKey] ?: ""
+    }
+
+    private fun hashPath(path: String): ByteArray {
+        val digest = MessageDigest.getInstance("SHA-256")
+        return digest.digest(path.toByteArray(Charsets.UTF_8))
+    }
+
+    private fun fileIdForPath(path: String): Long {
+        val digest = hashPath(path)
+        var value = 0L
+        for (i in 0 until 8) {
+            value = (value shl 8) or (digest[i].toLong() and 0xFF)
+        }
+        return value
+    }
+
+    private fun handleKey(bytes: ByteArray): String {
+        val sb = StringBuilder(bytes.size * 2)
+        for (b in bytes) {
+            sb.append(String.format("%02x", b))
+        }
+        return sb.toString()
     }
 
     private fun resolveNode(inode: Inode): ResolvedNode {
@@ -501,14 +574,14 @@ class SpacesVfs(
         stat.setATime(now)
         stat.setMTime(now)
         stat.setCTime(now)
-        stat.setFileid(path.hashCode().toLong())
+        stat.setFileid(fileIdForPath(path))
         stat.setGeneration(0)
         return stat
     }
 
     private fun fileStat(path: Path): Stat {
         val stat = Stat()
-        val attrs = Files.readAttributes(path, PosixFileAttributes::class.java)
+        val attrs = Files.readAttributes(path, PosixFileAttributes::class.java, LinkOption.NOFOLLOW_LINKS)
         val mode =
                 if (attrs.isDirectory) Stat.S_IFDIR
                 else if (attrs.isSymbolicLink) Stat.S_IFLNK else Stat.S_IFREG
@@ -520,7 +593,7 @@ class SpacesVfs(
         stat.setATime(attrs.lastAccessTime().toMillis())
         stat.setMTime(attrs.lastModifiedTime().toMillis())
         stat.setCTime(attrs.creationTime().toMillis())
-        stat.setFileid(path.toString().hashCode().toLong())
+        stat.setFileid(fileIdForPath(path.toString()))
         stat.setGeneration(0)
         return stat
     }

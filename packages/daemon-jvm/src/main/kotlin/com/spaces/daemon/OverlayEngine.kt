@@ -30,12 +30,12 @@ class OverlayEngine {
     fun resolvePath(view: OverlayView, relative: String): ResolvedPath? {
         val rel = Paths.get(relative)
         for (layer in view.layers) {
-            if (isHiddenInLayer(layer, rel)) {
-                return null
-            }
             val candidate = layer.resolve(rel)
             if (candidate.exists()) {
                 return ResolvedPath(candidate)
+            }
+            if (isWhiteoutedInLayer(layer, rel) || isOpaqueParentInLayer(layer, rel)) {
+                return null
             }
         }
         val lower = view.entrypoint.resolve(rel)
@@ -102,8 +102,7 @@ class OverlayEngine {
         val upperPath = topUpper.resolve(rel)
         if (upperPath.exists()) return
 
-        val lowerPath = view.entrypoint.resolve(rel)
-        if (!lowerPath.exists()) return
+        val lowerPath = lowerSourcePath(view, rel) ?: return
 
         if (lowerPath.isDirectory()) {
             ensureParentDirs(view, rel)
@@ -168,7 +167,7 @@ class OverlayEngine {
         }
     }
 
-    private fun isHiddenInLayer(layer: Path, relative: Path): Boolean {
+    private fun isOpaqueParentInLayer(layer: Path, relative: Path): Boolean {
         if (relative.nameCount == 0) return false
 
         var current = Paths.get("")
@@ -180,7 +179,10 @@ class OverlayEngine {
                 return true
             }
         }
+        return false
+    }
 
+    private fun isWhiteoutedInLayer(layer: Path, relative: Path): Boolean {
         val parent = relative.parent ?: return false
         val name = relative.fileName?.toString() ?: return false
         val marker = layer.resolve(parent).resolve(markerName(name))
