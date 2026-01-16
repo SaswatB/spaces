@@ -238,7 +238,9 @@ data class Config(
 ) {
     companion object {
         fun fromEnv(): Config {
-            val dataDir = env("SPACES_DATA_DIR", "/var/lib/spaces")
+            val userHome = System.getProperty("user.home")
+            val defaultDataDir = if (userHome.isNullOrBlank()) "/var/lib/spaces" else "$userHome/.spaces"
+            val dataDir = env("SPACES_DATA_DIR", defaultDataDir)
             val dbPath = env("SPACES_DB_PATH", "$dataDir/spaces.db")
             val apiHost = env("SPACES_API_HOST", "127.0.0.1")
             val apiPort = env("SPACES_API_PORT", "3100").toInt()

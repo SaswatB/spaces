@@ -22,15 +22,7 @@ class MountManager(private val config: Config) {
         Files.createDirectories(Paths.get(localPath))
         val source = "${config.nfsHost}:$exportPath"
         val options =
-                listOf(
-                                "vers=4",
-                                "tcp",
-                                "port=${config.nfsPort}",
-                                "resvport",
-                                "soft",
-                                "timeo=10",
-                                "retrans=2"
-                        )
+                listOf("vers=4", "tcp", "port=${config.nfsPort}", "soft", "timeo=10", "retrans=2")
                         .joinToString(",")
         val result = runCommand(listOf("mount_nfs", "-o", options, source, localPath), 20.seconds)
         if (result.exitCode != 0)
