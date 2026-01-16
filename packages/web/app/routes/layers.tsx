@@ -1,10 +1,10 @@
-import { createFileRoute, useSearch } from '@tanstack/react-router';
-import { useState } from 'react';
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { api } from '../lib/api';
+import { createFileRoute, useSearch } from "@tanstack/react-router";
+import { useState } from "react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { api, Entrypoint, Layer } from "../lib/api";
 
 // @ts-expect-error - Route types are generated at build time
-export const Route = createFileRoute('/layers')({
+export const Route = createFileRoute("/layers")({
   component: LayersPage,
   validateSearch: (search: Record<string, unknown>) => ({
     entrypointId: search.entrypointId as string | undefined,
@@ -13,13 +13,13 @@ export const Route = createFileRoute('/layers')({
 
 function LayersPage() {
   // @ts-expect-error - Route types are generated at build time
-  const { entrypointId } = useSearch({ from: '/layers' });
+  const { entrypointId } = useSearch({ from: "/layers" });
   const { data: layers, isLoading } = useQuery({
-    queryKey: ['layers', 'list', entrypointId],
+    queryKey: ["layers", "list", entrypointId],
     queryFn: () => api.layers.list(entrypointId),
   });
   const { data: entrypoints } = useQuery({
-    queryKey: ['entrypoints', 'list'],
+    queryKey: ["entrypoints", "list"],
     queryFn: () => api.entrypoints.list(),
   });
   const [showCreate, setShowCreate] = useState(false);
@@ -28,18 +28,24 @@ function LayersPage() {
 
   return (
     <>
-      <header style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+      <header
+        style={{
+          display: "flex",
+          justifyContent: "space-between",
+          alignItems: "center",
+        }}
+      >
         <div>
           <h1>Layers</h1>
           {selectedEntrypoint && (
             <p style={{ margin: 0 }}>
-              Filtered by: <strong>{selectedEntrypoint.name}</strong>{' '}
+              Filtered by: <strong>{selectedEntrypoint.name}</strong>{" "}
               <a href="/layers">(clear)</a>
             </p>
           )}
         </div>
         <button onClick={() => setShowCreate(!showCreate)}>
-          {showCreate ? 'Cancel' : 'Create Layer'}
+          {showCreate ? "Cancel" : "Create Layer"}
         </button>
       </header>
 
@@ -71,21 +77,6 @@ function LayersPage() {
   );
 }
 
-interface Entrypoint {
-  id: string;
-  name: string;
-  path: string;
-}
-
-interface LayerWithStatus {
-  id: string;
-  name: string;
-  entrypointId: string;
-  parentId: string | null;
-  mountPath: string;
-  mountStatus: 'mounted' | 'unmounted' | 'error';
-}
-
 function CreateLayerForm({
   entrypoints,
   layers,
@@ -93,23 +84,26 @@ function CreateLayerForm({
   onClose,
 }: {
   entrypoints: Entrypoint[];
-  layers: LayerWithStatus[];
+  layers: Layer[];
   defaultEntrypointId?: string;
   onClose: () => void;
 }) {
   const queryClient = useQueryClient();
   const create = useMutation({
-    mutationFn: (payload: { name: string; entrypointId: string; parentId: string | null }) =>
-      api.layers.create(payload),
+    mutationFn: (payload: {
+      name: string;
+      entrypointId: string;
+      parentId: string | null;
+    }) => api.layers.create(payload),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['layers', 'list'] });
-      queryClient.invalidateQueries({ queryKey: ['system', 'status'] });
+      queryClient.invalidateQueries({ queryKey: ["layers", "list"] });
+      queryClient.invalidateQueries({ queryKey: ["system", "status"] });
       onClose();
     },
   });
 
-  const [name, setName] = useState('');
-  const [entrypointId, setEntrypointId] = useState(defaultEntrypointId ?? '');
+  const [name, setName] = useState("");
+  const [entrypointId, setEntrypointId] = useState(defaultEntrypointId ?? "");
   const [parentId, setParentId] = useState<string | null>(null);
 
   const availableLayers = layers.filter((l) => l.entrypointId === entrypointId);
@@ -160,7 +154,7 @@ function CreateLayerForm({
         <label>
           Parent Layer (optional)
           <select
-            value={parentId ?? ''}
+            value={parentId ?? ""}
             onChange={(e) => setParentId(e.target.value || null)}
             disabled={!entrypointId}
           >
@@ -174,11 +168,15 @@ function CreateLayerForm({
           <small>Stack this layer on top of another layer</small>
         </label>
         {create.error && (
-          <p style={{ color: 'var(--pico-del-color)' }}>
+          <p style={{ color: "var(--pico-del-color)" }}>
             {create.error.message}
           </p>
         )}
-        <button type="submit" disabled={create.isPending} aria-busy={create.isPending}>
+        <button
+          type="submit"
+          disabled={create.isPending}
+          aria-busy={create.isPending}
+        >
           Create Layer
         </button>
       </form>
@@ -190,11 +188,11 @@ function LayerTree({
   layers,
   entrypoints,
 }: {
-  layers: LayerWithStatus[];
+  layers: Layer[];
   entrypoints: Entrypoint[];
 }) {
   // Group layers by entrypoint
-  const layersByEntrypoint = new Map<string, LayerWithStatus[]>();
+  const layersByEntrypoint = new Map<string, Layer[]>();
   for (const layer of layers) {
     const existing = layersByEntrypoint.get(layer.entrypointId) ?? [];
     existing.push(layer);
@@ -203,20 +201,22 @@ function LayerTree({
 
   return (
     <div>
-      {Array.from(layersByEntrypoint.entries()).map(([entrypointId, entrypointLayers]) => {
-        const entrypoint = entrypoints.find((e) => e.id === entrypointId);
-        return (
-          <article key={entrypointId} className="card">
-            <div className="card-header">
-              <h3 className="card-title">{entrypoint?.name ?? 'Unknown'}</h3>
-              <span className="badge badge-info">
-                {entrypointLayers.length} layers
-              </span>
-            </div>
-            <LayerTreeLevel layers={entrypointLayers} parentId={null} />
-          </article>
-        );
-      })}
+      {Array.from(layersByEntrypoint.entries()).map(
+        ([entrypointId, entrypointLayers]) => {
+          const entrypoint = entrypoints.find((e) => e.id === entrypointId);
+          return (
+            <article key={entrypointId} className="card">
+              <div className="card-header">
+                <h3 className="card-title">{entrypoint?.name ?? "Unknown"}</h3>
+                <span className="badge badge-info">
+                  {entrypointLayers.length} layers
+                </span>
+              </div>
+              <LayerTreeLevel layers={entrypointLayers} parentId={null} />
+            </article>
+          );
+        }
+      )}
     </div>
   );
 }
@@ -225,7 +225,7 @@ function LayerTreeLevel({
   layers,
   parentId,
 }: {
-  layers: LayerWithStatus[];
+  layers: Layer[];
   parentId: string | null;
 }) {
   const childLayers = layers.filter((l) => l.parentId === parentId);
@@ -233,7 +233,7 @@ function LayerTreeLevel({
   if (childLayers.length === 0) return null;
 
   return (
-    <div className={parentId ? 'tree' : ''}>
+    <div className={parentId ? "tree" : ""}>
       {childLayers.map((layer) => (
         <div key={layer.id} className="tree-item">
           <LayerCard layer={layer} />
@@ -244,43 +244,51 @@ function LayerTreeLevel({
   );
 }
 
-function LayerCard({ layer }: { layer: LayerWithStatus }) {
+function LayerCard({ layer }: { layer: Layer }) {
   const queryClient = useQueryClient();
   const mountLayer = useMutation({
     mutationFn: (payload: { id: string }) => api.layers.mount(payload.id),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['layers', 'list'] }),
+    onSuccess: () =>
+      queryClient.invalidateQueries({ queryKey: ["layers", "list"] }),
   });
 
   const unmountLayer = useMutation({
     mutationFn: (payload: { id: string }) => api.layers.unmount(payload.id),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['layers', 'list'] }),
+    onSuccess: () =>
+      queryClient.invalidateQueries({ queryKey: ["layers", "list"] }),
   });
 
   const deleteLayer = useMutation({
     mutationFn: (payload: { id: string }) => api.layers.delete(payload.id),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['layers', 'list'] });
-      queryClient.invalidateQueries({ queryKey: ['system', 'status'] });
+      queryClient.invalidateQueries({ queryKey: ["layers", "list"] });
+      queryClient.invalidateQueries({ queryKey: ["system", "status"] });
     },
   });
 
   const [confirmDelete, setConfirmDelete] = useState(false);
 
-  const isMounted = layer.mountStatus === 'mounted';
+  const isMounted = layer.mountStatus === "mounted";
 
   return (
     <div
       style={{
-        padding: '0.75rem',
-        background: 'var(--pico-card-sectioning-background-color)',
-        borderRadius: 'var(--pico-border-radius)',
-        marginBottom: '0.5rem',
+        padding: "0.75rem",
+        background: "var(--pico-card-sectioning-background-color)",
+        borderRadius: "var(--pico-border-radius)",
+        marginBottom: "0.5rem",
       }}
     >
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+      <div
+        style={{
+          display: "flex",
+          justifyContent: "space-between",
+          alignItems: "center",
+        }}
+      >
         <div>
           <span
-            className={`status-dot ${isMounted ? 'mounted' : 'unmounted'}`}
+            className={`status-dot ${isMounted ? "mounted" : "unmounted"}`}
           />
           <strong>{layer.name}</strong>
         </div>
@@ -308,7 +316,7 @@ function LayerCard({ layer }: { layer: LayerWithStatus }) {
             <>
               <button
                 className="button-small"
-                style={{ background: 'var(--pico-del-color)' }}
+                style={{ background: "var(--pico-del-color)" }}
                 onClick={() => deleteLayer.mutate({ id: layer.id })}
                 disabled={deleteLayer.isPending}
               >
@@ -331,11 +339,20 @@ function LayerCard({ layer }: { layer: LayerWithStatus }) {
           )}
         </div>
       </div>
-      <p className="path-display" style={{ marginTop: '0.5rem', marginBottom: 0 }}>
+      <p
+        className="path-display"
+        style={{ marginTop: "0.5rem", marginBottom: 0 }}
+      >
         {layer.mountPath}
       </p>
       {deleteLayer.error && (
-        <p style={{ color: 'var(--pico-del-color)', marginTop: '0.5rem', marginBottom: 0 }}>
+        <p
+          style={{
+            color: "var(--pico-del-color)",
+            marginTop: "0.5rem",
+            marginBottom: 0,
+          }}
+        >
           {deleteLayer.error.message}
         </p>
       )}

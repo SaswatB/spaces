@@ -1,34 +1,40 @@
-import { createFileRoute } from '@tanstack/react-router';
-import { useState } from 'react';
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { api } from '../lib/api';
+import { createFileRoute } from "@tanstack/react-router";
+import { useState } from "react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { api, Entrypoint, Layer, UserMount } from "../lib/api";
 
 // @ts-expect-error - Route types are generated at build time
-export const Route = createFileRoute('/mounts')({
+export const Route = createFileRoute("/mounts")({
   component: MountsPage,
 });
 
 function MountsPage() {
   const { data: mounts, isLoading } = useQuery({
-    queryKey: ['user-mounts', 'list'],
+    queryKey: ["user-mounts", "list"],
     queryFn: () => api.userMounts.list(),
   });
   const { data: entrypoints } = useQuery({
-    queryKey: ['entrypoints', 'list'],
+    queryKey: ["entrypoints", "list"],
     queryFn: () => api.entrypoints.list(),
   });
   const { data: layers } = useQuery({
-    queryKey: ['layers', 'list'],
+    queryKey: ["layers", "list"],
     queryFn: () => api.layers.list(),
   });
   const [showCreate, setShowCreate] = useState(false);
 
   return (
     <>
-      <header style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+      <header
+        style={{
+          display: "flex",
+          justifyContent: "space-between",
+          alignItems: "center",
+        }}
+      >
         <h1>User Mounts</h1>
         <button onClick={() => setShowCreate(!showCreate)}>
-          {showCreate ? 'Cancel' : 'Create User Mount'}
+          {showCreate ? "Cancel" : "Create User Mount"}
         </button>
       </header>
 
@@ -55,45 +61,12 @@ function MountsPage() {
       ) : (
         <div>
           {mounts?.map((mount) => (
-            <UserMountCard
-              key={mount.id}
-              mount={mount}
-              layers={layers ?? []}
-            />
+            <UserMountCard key={mount.id} mount={mount} layers={layers ?? []} />
           ))}
         </div>
       )}
     </>
   );
-}
-
-interface Entrypoint {
-  id: string;
-  name: string;
-  path: string;
-}
-
-interface LayerWithStatus {
-  id: string;
-  name: string;
-  entrypointId: string;
-  parentId: string | null;
-  mountPath: string;
-  mountStatus: 'mounted' | 'unmounted' | 'error';
-}
-
-interface UserMountWithStatus {
-  id: string;
-  name: string;
-  entrypointId: string;
-  attachedLayerId: string | null;
-  mountPath: string;
-  mountStatus: 'mounted' | 'unmounted' | 'error';
-  syncState?: {
-    status: 'idle' | 'syncing' | 'error';
-    lastSyncedAt: string | null; // JSON serializes dates as strings
-    error: string | null;
-  };
 }
 
 function CreateUserMountForm({
@@ -102,7 +75,7 @@ function CreateUserMountForm({
   onClose,
 }: {
   entrypoints: Entrypoint[];
-  layers: LayerWithStatus[];
+  layers: Layer[];
   onClose: () => void;
 }) {
   const queryClient = useQueryClient();
@@ -114,15 +87,15 @@ function CreateUserMountForm({
       attachedLayerId: string | null;
     }) => api.userMounts.create(payload),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['user-mounts', 'list'] });
-      queryClient.invalidateQueries({ queryKey: ['system', 'status'] });
+      queryClient.invalidateQueries({ queryKey: ["user-mounts", "list"] });
+      queryClient.invalidateQueries({ queryKey: ["system", "status"] });
       onClose();
     },
   });
 
-  const [name, setName] = useState('');
-  const [entrypointId, setEntrypointId] = useState('');
-  const [mountPath, setMountPath] = useState('');
+  const [name, setName] = useState("");
+  const [entrypointId, setEntrypointId] = useState("");
+  const [mountPath, setMountPath] = useState("");
   const [attachedLayerId, setAttachedLayerId] = useState<string | null>(null);
 
   const availableLayers = layers.filter((l) => l.entrypointId === entrypointId);
@@ -185,7 +158,7 @@ function CreateUserMountForm({
         <label>
           Attached Layer (optional)
           <select
-            value={attachedLayerId ?? ''}
+            value={attachedLayerId ?? ""}
             onChange={(e) => setAttachedLayerId(e.target.value || null)}
             disabled={!entrypointId}
           >
@@ -199,11 +172,15 @@ function CreateUserMountForm({
           <small>Changes will sync bidirectionally with this layer</small>
         </label>
         {create.error && (
-          <p style={{ color: 'var(--pico-del-color)' }}>
+          <p style={{ color: "var(--pico-del-color)" }}>
             {create.error.message}
           </p>
         )}
-        <button type="submit" disabled={create.isPending} aria-busy={create.isPending}>
+        <button
+          type="submit"
+          disabled={create.isPending}
+          aria-busy={create.isPending}
+        >
           Create User Mount
         </button>
       </form>
@@ -215,48 +192,53 @@ function UserMountCard({
   mount,
   layers,
 }: {
-  mount: UserMountWithStatus;
-  layers: LayerWithStatus[];
+  mount: UserMount;
+  layers: Layer[];
 }) {
   const queryClient = useQueryClient();
 
   const mountUserMount = useMutation({
     mutationFn: (payload: { id: string }) => api.userMounts.mount(payload.id),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['user-mounts', 'list'] }),
+    onSuccess: () =>
+      queryClient.invalidateQueries({ queryKey: ["user-mounts", "list"] }),
   });
 
   const unmountUserMount = useMutation({
     mutationFn: (payload: { id: string }) => api.userMounts.unmount(payload.id),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['user-mounts', 'list'] }),
+    onSuccess: () =>
+      queryClient.invalidateQueries({ queryKey: ["user-mounts", "list"] }),
   });
 
   const attachLayer = useMutation({
     mutationFn: (payload: { userMountId: string; layerId: string | null }) =>
       api.userMounts.attachLayer(payload),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['user-mounts', 'list'] }),
+    onSuccess: () =>
+      queryClient.invalidateQueries({ queryKey: ["user-mounts", "list"] }),
   });
 
   const deleteMount = useMutation({
     mutationFn: (payload: { id: string }) => api.userMounts.delete(payload.id),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['user-mounts', 'list'] });
-      queryClient.invalidateQueries({ queryKey: ['system', 'status'] });
+      queryClient.invalidateQueries({ queryKey: ["user-mounts", "list"] });
+      queryClient.invalidateQueries({ queryKey: ["system", "status"] });
     },
   });
 
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [showLayerSelect, setShowLayerSelect] = useState(false);
 
-  const isMounted = mount.mountStatus === 'mounted';
+  const isMounted = mount.mountStatus === "mounted";
   const attachedLayer = layers.find((l) => l.id === mount.attachedLayerId);
-  const availableLayers = layers.filter((l) => l.entrypointId === mount.entrypointId);
+  const availableLayers = layers.filter(
+    (l) => l.entrypointId === mount.entrypointId
+  );
 
   const getSyncStatusBadge = () => {
     if (!mount.syncState) return null;
     switch (mount.syncState.status) {
-      case 'syncing':
+      case "syncing":
         return <span className="badge badge-info">Syncing</span>;
-      case 'error':
+      case "error":
         return <span className="badge badge-error">Sync Error</span>;
       default:
         return <span className="badge badge-success">Synced</span>;
@@ -267,8 +249,10 @@ function UserMountCard({
     <article className="card">
       <div className="card-header">
         <div>
-          <span className={`status-dot ${isMounted ? 'mounted' : 'unmounted'}`} />
-          <h3 className="card-title" style={{ display: 'inline' }}>
+          <span
+            className={`status-dot ${isMounted ? "mounted" : "unmounted"}`}
+          />
+          <h3 className="card-title" style={{ display: "inline" }}>
             {mount.name}
           </h3>
           {mount.attachedLayerId && getSyncStatusBadge()}
@@ -297,7 +281,7 @@ function UserMountCard({
             <>
               <button
                 className="button-small"
-                style={{ background: 'var(--pico-del-color)' }}
+                style={{ background: "var(--pico-del-color)" }}
                 onClick={() => deleteMount.mutate({ id: mount.id })}
                 disabled={deleteMount.isPending}
               >
@@ -323,12 +307,12 @@ function UserMountCard({
 
       <p className="path-display">{mount.mountPath}</p>
 
-      <div style={{ marginTop: '1rem' }}>
+      <div style={{ marginTop: "1rem" }}>
         <strong>Attached Layer: </strong>
         {showLayerSelect ? (
-          <div style={{ display: 'flex', gap: '0.5rem', marginTop: '0.5rem' }}>
+          <div style={{ display: "flex", gap: "0.5rem", marginTop: "0.5rem" }}>
             <select
-              value={mount.attachedLayerId ?? ''}
+              value={mount.attachedLayerId ?? ""}
               onChange={(e) => {
                 attachLayer.mutate({
                   userMountId: mount.id,
@@ -354,10 +338,10 @@ function UserMountCard({
           </div>
         ) : (
           <>
-            {attachedLayer ? attachedLayer.name : 'None'}
+            {attachedLayer ? attachedLayer.name : "None"}
             <button
               className="outline button-small"
-              style={{ marginLeft: '0.5rem' }}
+              style={{ marginLeft: "0.5rem" }}
               onClick={() => setShowLayerSelect(true)}
             >
               Change
@@ -367,13 +351,13 @@ function UserMountCard({
       </div>
 
       {mount.syncState?.error && (
-        <p style={{ color: 'var(--pico-del-color)', marginTop: '0.5rem' }}>
+        <p style={{ color: "var(--pico-del-color)", marginTop: "0.5rem" }}>
           Sync error: {mount.syncState.error}
         </p>
       )}
 
       {deleteMount.error && (
-        <p style={{ color: 'var(--pico-del-color)', marginTop: '0.5rem' }}>
+        <p style={{ color: "var(--pico-del-color)", marginTop: "0.5rem" }}>
           {deleteMount.error.message}
         </p>
       )}
