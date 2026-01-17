@@ -2,6 +2,7 @@ package com.spaces.daemon
 
 import java.io.IOException
 import java.nio.ByteBuffer
+import java.nio.channels.ClosedChannelException
 import java.nio.channels.FileChannel
 import java.nio.file.*
 import java.nio.file.attribute.BasicFileAttributes
@@ -10,6 +11,7 @@ import java.nio.file.attribute.PosixFilePermission
 import java.nio.file.attribute.PosixFilePermissions
 import java.security.MessageDigest
 import java.time.Instant
+import java.util.Base64
 import java.util.concurrent.ConcurrentHashMap
 import javax.security.auth.Subject
 import kotlin.io.path.exists
@@ -19,7 +21,10 @@ import org.dcache.nfs.status.NotDirException
 import org.dcache.nfs.status.NotEmptyException
 import org.dcache.nfs.status.PermException
 import org.dcache.nfs.v4.NfsIdMapping
+import org.dcache.nfs.v4.Stateids
+import org.dcache.nfs.v4.xdr.nfs4_prot
 import org.dcache.nfs.v4.xdr.nfsace4
+import org.dcache.nfs.v4.xdr.stateid4
 import org.dcache.nfs.vfs.AclCheckable
 import org.dcache.nfs.vfs.DirectoryEntry
 import org.dcache.nfs.vfs.DirectoryStream as NfsDirectoryStream
@@ -38,6 +43,7 @@ class SpacesVfs(
     private val idMapping = SimpleIdMapping()
     private val handleToPath = ConcurrentHashMap<String, String>()
     private val handleToInode = ConcurrentHashMap<String, Inode>()
+    private val openWriteHandles = ConcurrentHashMap<String, OpenHandle>()
 
     override fun access(inode: Inode, mode: Int): Int {
         val resolved = resolveNode(inode)
@@ -59,6 +65,8 @@ class SpacesVfs(
         val topUpper = mount.view.layers.firstOrNull() ?: throw PermException()
         overlay.ensureParentDirs(mount.view, Paths.get(relative))
         val target = topUpper.resolve(relative)
+        val start = System.nanoTime()
+        logOpStart("CREATE", target.toString())
         try {
             when (type) {
                 Stat.Type.DIRECTORY -> Files.createDirectory(target)
@@ -68,8 +76,11 @@ class SpacesVfs(
                     Files.createFile(target)
                 }
             }
+            applyMode(target, mode)
         } catch (_: FileAlreadyExistsException) {
             throw ExistException()
+        } finally {
+            logOpEnd("CREATE", target.toString(), start)
         }
         overlay.applyEntrypointOwner(mount.view, target)
         emitOp(mount, relative, NfsOpKind.Create)
@@ -222,6 +233,7 @@ class SpacesVfs(
         overlay.ensureParentDirs(mount.view, Paths.get(relative))
         val target = topUpper.resolve(relative)
         Files.createDirectories(target)
+        applyMode(target, mode)
         overlay.applyEntrypointOwner(mount.view, target)
         overlay.markOpaque(mount.view, relative)
         emitOp(mount, relative, NfsOpKind.Mkdir)
@@ -243,7 +255,10 @@ class SpacesVfs(
         overlay.ensureParentDirs(mount.view, Paths.get(toRel))
         val source = topUpper.resolve(fromRel)
         val target = topUpper.resolve(toRel)
+        val start = System.nanoTime()
+        logOpStart("MOVE", "${source} -> ${target}")
         Files.move(source, target, StandardCopyOption.REPLACE_EXISTING)
+        logOpEnd("MOVE", "${source} -> ${target}", start)
         updateHandlePathsForMove(fromResolved.mountPath, fromRel, toRel)
         emitOp(mount, fromRel, NfsOpKind.Rename)
         return true
@@ -314,10 +329,14 @@ class SpacesVfs(
         val topUpper = mount.view.layers.firstOrNull() ?: throw PermException()
         val upperPath = topUpper.resolve(rel)
         if (upperPath.exists()) {
+            val start = System.nanoTime()
+            logOpStart("REMOVE", upperPath.toString())
             try {
                 Files.deleteIfExists(upperPath)
             } catch (_: DirectoryNotEmptyException) {
                 throw NotEmptyException()
+            } finally {
+                logOpEnd("REMOVE", upperPath.toString(), start)
             }
             emitOp(mount, rel, NfsOpKind.Remove)
             return
@@ -367,6 +386,8 @@ class SpacesVfs(
         val topUpper = mount.view.layers.firstOrNull() ?: throw PermException()
         val target = topUpper.resolve(rel)
         Files.createDirectories(target.parent)
+        val start = System.nanoTime()
+        logOpStart("WRITE", target.toString())
         FileChannel.open(
                         target,
                         StandardOpenOption.CREATE,
@@ -377,13 +398,90 @@ class SpacesVfs(
                     channel.position(offset)
                     val buffer = ByteBuffer.wrap(data, 0, count)
                     val written = channel.write(buffer)
+                    logOpEnd("WRITE", target.toString(), start)
                     emitOp(mount, rel, NfsOpKind.Write)
                     return VirtualFileSystem.WriteResult(stabilityLevel, written)
                 }
     }
 
+    fun writeWithState(
+            inode: Inode,
+            stateid: stateid4,
+            data: ByteArray,
+            offset: Long,
+            count: Int,
+            stabilityLevel: VirtualFileSystem.StabilityLevel
+    ): VirtualFileSystem.WriteResult {
+        if (Stateids.isStateLess(stateid)) {
+            return write(inode, data, offset, count, stabilityLevel)
+        }
+
+        val resolved = resolveNode(inode)
+        requireKnown(resolved)
+        val mount = resolved.mountView ?: throw NoEntException()
+        ensureWritable(mount)
+        val rel = resolved.relativePath
+        val key = stateKey(stateid)
+        val handle = openWriteHandles[key]
+        if (handle != null) {
+            val start = System.nanoTime()
+            logOpStart("WRITE", handle.path.toString())
+            return try {
+                val buffer = ByteBuffer.wrap(data, 0, count)
+                val written = handle.channel.write(buffer, offset)
+                logOpEnd("WRITE", handle.path.toString(), start)
+                emitOp(mount, rel, NfsOpKind.Write)
+                VirtualFileSystem.WriteResult(stabilityLevel, written)
+            } catch (_: ClosedChannelException) {
+                openWriteHandles.remove(stateKey(stateid))
+                write(inode, data, offset, count, stabilityLevel)
+            }
+        }
+
+        return write(inode, data, offset, count, stabilityLevel)
+    }
+
+    fun registerOpenState(inode: Inode, stateid: stateid4, shareAccess: Int) {
+        val access = shareAccess and nfs4_prot.OPEN4_SHARE_ACCESS_BOTH
+        if (access and nfs4_prot.OPEN4_SHARE_ACCESS_WRITE == 0) return
+
+        val key = stateKey(stateid)
+        if (openWriteHandles.containsKey(key)) return
+
+        val target = resolveWritableTarget(inode)
+        val channel = FileChannel.open(target, StandardOpenOption.WRITE, StandardOpenOption.READ)
+        val existing = openWriteHandles.putIfAbsent(key, OpenHandle(channel, target))
+        if (existing != null) {
+            channel.close()
+        }
+    }
+
+    fun downgradeOpenState(stateid: stateid4, shareAccess: Int) {
+        val access = shareAccess and nfs4_prot.OPEN4_SHARE_ACCESS_BOTH
+        if (access and nfs4_prot.OPEN4_SHARE_ACCESS_WRITE != 0) return
+        closeOpenState(stateid)
+    }
+
+    fun closeOpenState(stateid: stateid4) {
+        val handle = openWriteHandles.remove(stateKey(stateid)) ?: return
+        try {
+            handle.channel.close()
+        } catch (e: Exception) {
+            logger.warn(
+                    "Failed to close open state stateid={} path={}",
+                    stateKey(stateid),
+                    handle.path,
+                    e
+            )
+        }
+    }
+
     override fun commit(inode: Inode, offset: Long, count: Int) {
-        // no-op
+        val resolved = resolveNode(inode)
+        val rel = resolved.relativePath
+        val start = System.nanoTime()
+        logOpStart("COMMIT", rel)
+        logOpEnd("COMMIT", rel, start)
     }
 
     override fun getattr(inode: Inode): Stat {
@@ -770,6 +868,31 @@ class SpacesVfs(
         return PosixFilePermissions.fromString(str)
     }
 
+    private fun applyMode(target: Path, mode: Int) {
+        try {
+            Files.setPosixFilePermissions(target, modeToPermissions(mode))
+        } catch (e: Exception) {
+            logger.warn("Failed to apply mode to target={} mode={}", target, mode, e)
+        }
+    }
+
+    private fun resolveWritableTarget(inode: Inode): Path {
+        val resolved = resolveNode(inode)
+        requireKnown(resolved)
+        val mount = resolved.mountView ?: throw NoEntException()
+        ensureWritable(mount)
+        val rel = resolved.relativePath
+        overlay.copyUpIfNeeded(mount.view, rel)
+        val topUpper = mount.view.layers.firstOrNull() ?: throw PermException()
+        val target = topUpper.resolve(rel)
+        Files.createDirectories(target.parent)
+        return target
+    }
+
+    private fun stateKey(stateid: stateid4): String {
+        return Base64.getEncoder().encodeToString(stateid.other)
+    }
+
     private fun readUnixId(path: Path, name: String): Int {
         return try {
             val value = Files.getAttribute(path, "unix:$name")
@@ -785,7 +908,18 @@ class SpacesVfs(
     private fun emitOp(mount: MountView, relative: String, kind: NfsOpKind) {
         replication?.handleOp(NfsOp(mount.mountId, relative, kind))
     }
+
+    private fun logOpStart(op: String, path: String) {
+        logger.debug("{} start path={}", op, path)
+    }
+
+    private fun logOpEnd(op: String, path: String, start: Long) {
+        val elapsedMs = (System.nanoTime() - start) / 1_000_000
+        logger.debug("{} end path={} durationMs={}", op, path, elapsedMs)
+    }
 }
+
+private data class OpenHandle(val channel: FileChannel, val path: Path)
 
 data class MountView(val view: OverlayView, val writable: Boolean, val mountId: String)
 

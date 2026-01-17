@@ -1,6 +1,5 @@
 package com.spaces.daemon
 
-import org.dcache.nfs.v4.MDSOperationExecutor
 import org.dcache.nfs.v4.NFSServerV41
 import org.dcache.nfs.v4.nlm.SimpleLm
 import org.dcache.oncrpc4j.rpc.OncRpcProgram
@@ -19,7 +18,7 @@ class NfsServer(
                 NFSServerV41.Builder()
                         .withExportTable(SpacesExportTable())
                         .withVfs(SpacesVfs(db, replication))
-                        .withOperationExecutor(MDSOperationExecutor())
+                        .withOperationExecutor(SpacesOperationExecutor())
                         .withLockManager(SimpleLm())
                         .build()
 
