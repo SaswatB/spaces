@@ -11,6 +11,7 @@
     "cli": "tsx bin/spaces.ts"
   },
   "dependencies": {
+    "cac": "^6.7.14",
     "@tanstack/react-router": "1.159.14",
     "@tanstack/react-start": "1.159.14",
     "@tanstack/react-query": "^5.62.8",

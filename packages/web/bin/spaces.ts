@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { createInterface } from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
+import { cac } from "cac";
 import { api } from "../src/lib/api";
 
 type Entrypoint = Awaited<ReturnType<typeof api.entrypoints.list>>[number];
@@ -13,36 +14,19 @@ type UserMount = Awaited<ReturnType<typeof api.userMounts.list>>[number];
 type SystemStatus = Awaited<ReturnType<typeof api.system.status>>;
 
 type Category = "entrypoint" | "layer" | "mount" | "daemon";
+type MatchBy = { id: string; name: string; path?: string; mountPath?: string };
 
-type GlobalOptions = {
-  json: boolean;
-  force: boolean;
+type CommonOptions = {
+  json?: boolean;
+  force?: boolean;
 };
 
 type CommandContext = {
   args: string[];
-  opts: GlobalOptions;
+  opts: CommonOptions;
 };
 
 type CommandHandler = (ctx: CommandContext) => Promise<void>;
-
-type MatchBy = { id: string; name: string; path?: string; mountPath?: string };
-
-const categoryAliases: Record<string, Category> = {
-  entrypoint: "entrypoint",
-  entrypoints: "entrypoint",
-  ep: "entrypoint",
-  e: "entrypoint",
-  layer: "layer",
-  layers: "layer",
-  l: "layer",
-  mount: "mount",
-  mounts: "mount",
-  m: "mount",
-  daemon: "daemon",
-  daemons: "daemon",
-  d: "daemon",
-};
 
 const DAEMON_URL = process.env.SPACES_API_URL ?? "http://localhost:3100";
 
@@ -74,34 +58,14 @@ function selectByPath<T extends MatchBy>(items: T[], targetPath: string, key: "p
   return matches[0] ?? null;
 }
 
-function parseGlobalOptions(argv: string[]): { opts: GlobalOptions; args: string[] } {
-  const opts: GlobalOptions = { json: false, force: false };
-  const args: string[] = [];
-
-  for (const arg of argv) {
-    if (arg === "--json" || arg === "-j") {
-      opts.json = true;
-      continue;
-    }
-    if (arg === "--force" || arg === "-f") {
-      opts.force = true;
-      continue;
-    }
-    args.push(arg);
-  }
-
-  return { opts, args };
-}
-
 function parseFlags(args: string[]): { flags: Record<string, string | boolean>; positional: string[] } {
   const flags: Record<string, string | boolean> = {};
   const positional: string[] = [];
 
   for (let i = 0; i < args.length; i += 1) {
     const arg = args[i];
-    if (!arg) {
-      continue;
-    }
+    if (!arg) continue;
+
     if (!arg.startsWith("--")) {
       positional.push(arg);
       continue;
@@ -130,9 +94,7 @@ function parseFlags(args: string[]): { flags: Record<string, string | boolean>; 
 function getFlagString(flags: Record<string, string | boolean>, names: string[]): string | undefined {
   for (const name of names) {
     const value = flags[name];
-    if (typeof value === "string" && value.trim()) {
-      return value;
-    }
+    if (typeof value === "string" && value.trim()) return value;
   }
   return undefined;
 }
@@ -209,6 +171,7 @@ function printTable(rows: Array<Record<string, string>>): void {
     console.log("No results.");
     return;
   }
+
   const headers = Object.keys(first);
   const widths = headers.map((header) => {
     const maxCell = rows.reduce((max, row) => Math.max(max, (row[header] ?? "").length), header.length);
@@ -231,11 +194,11 @@ function outputData<T>(ctx: CommandContext, data: T, human: (value: T) => void):
   human(data);
 }
 
-async function confirmOrThrow(prompt: string, force: boolean): Promise<void> {
+async function confirmOrThrow(prompt: string, force?: boolean): Promise<void> {
   if (force) return;
 
   if (!process.stdin.isTTY) {
-    throw new Error(`Refusing destructive action in non-interactive mode. Re-run with --force.`);
+    throw new Error("Refusing destructive action in non-interactive mode. Re-run with --force.");
   }
 
   const rl = createInterface({ input, output });
@@ -255,14 +218,25 @@ function printStatus(status: SystemStatus): void {
   console.log(`User mounts: ${status.userMountCount} (${status.mountedUserMounts} mounted)`);
 }
 
-async function stopDaemon(): Promise<{ stopped: boolean; message: string }> {
+function daemonStatusPayload(): { running: boolean; pid: number | null; stateDir: string; logFile: string } {
+  const pid = readPid();
+  const running = pid !== null && isRunning(pid);
+  return {
+    running,
+    pid: running ? pid : null,
+    stateDir: stateDir(),
+    logFile: logFilePath(),
+  };
+}
+
+async function stopDaemon(): Promise<{ stopped: boolean; message: string; pid: number | null }> {
   const pid = readPid();
   if (!pid) {
-    return { stopped: false, message: "Daemon not running." };
+    return { stopped: false, message: "Daemon not running.", pid: null };
   }
   if (!isRunning(pid)) {
     fs.rmSync(pidFilePath(), { force: true });
-    return { stopped: true, message: `Removed stale pid ${pid}.` };
+    return { stopped: true, message: `Removed stale pid ${pid}.`, pid };
   }
   try {
     process.kill(pid, "SIGTERM");
@@ -270,6 +244,7 @@ async function stopDaemon(): Promise<{ stopped: boolean; message: string }> {
     return {
       stopped: false,
       message: `Failed to stop daemon: ${String(error)}`,
+      pid,
     };
   }
 
@@ -277,7 +252,7 @@ async function stopDaemon(): Promise<{ stopped: boolean; message: string }> {
   while (Date.now() < deadline) {
     if (!isRunning(pid)) {
       fs.rmSync(pidFilePath(), { force: true });
-      return { stopped: true, message: `Stopped daemon ${pid}.` };
+      return { stopped: true, message: `Stopped daemon ${pid}.`, pid };
     }
     await new Promise((resolve) => setTimeout(resolve, 200));
   }
@@ -288,10 +263,11 @@ async function stopDaemon(): Promise<{ stopped: boolean; message: string }> {
     return {
       stopped: false,
       message: `Failed to force stop daemon: ${String(error)}`,
+      pid,
     };
   }
   fs.rmSync(pidFilePath(), { force: true });
-  return { stopped: true, message: `Force stopped daemon ${pid}.` };
+  return { stopped: true, message: `Force stopped daemon ${pid}.`, pid };
 }
 
 async function resolveEntrypoint(ref?: string): Promise<Entrypoint | null> {
@@ -324,19 +300,25 @@ async function resolveUserMount(ref?: string, entrypoint?: Entrypoint | null): P
   return selectByPath(mounts, process.cwd(), "mountPath");
 }
 
-const daemonCommands: Record<string, CommandHandler> = {
-  status: async () => {
-    const pid = readPid();
-    if (pid && isRunning(pid)) {
-      console.log(`Daemon running (pid ${pid}).`);
-      return;
-    }
-    console.log("Daemon not running.");
+const daemonCommands = {
+  status: async (ctx) => {
+    const payload = daemonStatusPayload();
+    outputData(ctx, payload, (value) => {
+      if (value.running) {
+        console.log(`Daemon running (pid ${value.pid}).`);
+      } else {
+        console.log("Daemon not running.");
+      }
+      console.log(`State dir: ${value.stateDir}`);
+      console.log(`Log file: ${value.logFile}`);
+    });
   },
-  start: async ({ args }) => {
+  start: async (ctx) => {
     const pid = readPid();
     if (pid && isRunning(pid)) {
-      console.log(`Daemon already running (pid ${pid}).`);
+      outputData(ctx, { ok: true, alreadyRunning: true, pid }, (value) => {
+        console.log(`Daemon already running (pid ${value.pid}).`);
+      });
       return;
     }
     if (pid && !isRunning(pid)) {
@@ -353,7 +335,7 @@ const daemonCommands: Record<string, CommandHandler> = {
     const logFd = fs.openSync(logPath, "a");
     let child: ReturnType<typeof spawn> | null = null;
     try {
-      child = spawn(daemonPath, args, {
+      child = spawn(daemonPath, ctx.args, {
         detached: true,
         stdio: ["ignore", logFd, logFd],
         env: { ...process.env },
@@ -381,35 +363,41 @@ const daemonCommands: Record<string, CommandHandler> = {
     }
     fs.writeFileSync(pidFilePath(), String(startedPid));
     fs.closeSync(logFd);
-    console.log(`Started daemon (pid ${startedPid}).`);
-    console.log(`Logs: ${logPath}`);
-  },
-  stop: async () => {
-    const result = await stopDaemon();
-    console.log(result.message);
-  },
-  restart: async ({ args }) => {
-    await stopDaemon();
-    const startHandler = daemonCommands.start;
-    if (!startHandler) {
-      throw new Error("Daemon start command unavailable.");
-    }
-    await startHandler({ args, opts: { json: false, force: false } });
-  },
-};
 
-const rootCommands: Record<string, CommandHandler> = {
+    outputData(ctx, { ok: true, pid: startedPid, logFile: logPath }, (value) => {
+      console.log(`Started daemon (pid ${value.pid}).`);
+      console.log(`Logs: ${value.logFile}`);
+    });
+  },
+  stop: async (ctx) => {
+    const result = await stopDaemon();
+    outputData(ctx, { ok: result.stopped, pid: result.pid, message: result.message }, (value) => {
+      console.log(value.message);
+    });
+  },
+  restart: async (ctx) => {
+    const stopResult = await stopDaemon();
+    await daemonCommands.start({ ...ctx, args: ctx.args });
+    if (!ctx.opts.json) {
+      console.log(stopResult.message);
+    }
+  },
+} satisfies Record<"status" | "start" | "stop" | "restart", CommandHandler>;
+
+const rootCommands = {
   status: async (ctx) => {
     const status = await api.system.status();
     outputData(ctx, status, printStatus);
   },
-  remount: async () => {
+  remount: async (ctx) => {
     await api.system.remount();
-    console.log("Remounted all layer and user mounts.");
+    outputData(ctx, { ok: true }, () => {
+      console.log("Remounted all layer and user mounts.");
+    });
   },
-};
+} satisfies Record<"status" | "remount", CommandHandler>;
 
-const entrypointCommands: Record<string, CommandHandler> = {
+const entrypointCommands = {
   list: async (ctx) => {
     const [ref] = ctx.args;
     const entrypoint = await resolveEntrypoint(ref);
@@ -447,17 +435,16 @@ const entrypointCommands: Record<string, CommandHandler> = {
       throw new Error(`Entrypoint not found: ${ref ?? "(infer)"}`);
     }
 
-    await confirmOrThrow(
-      `Delete entrypoint '${entrypoint.name}' (${entrypoint.id})?`,
-      ctx.opts.force,
-    );
-
+    await confirmOrThrow(`Delete entrypoint '${entrypoint.name}' (${entrypoint.id})?`, ctx.opts.force);
     await api.entrypoints.delete(entrypoint.id);
-    console.log(`Deleted entrypoint ${entrypoint.id}.`);
-  },
-};
 
-const layerCommands: Record<string, CommandHandler> = {
+    outputData(ctx, { ok: true, id: entrypoint.id }, (value) => {
+      console.log(`Deleted entrypoint ${value.id}.`);
+    });
+  },
+} satisfies Record<"list" | "create" | "delete", CommandHandler>;
+
+const layerCommands = {
   list: async (ctx) => {
     const [ref] = ctx.args;
     const entrypoint = await resolveEntrypoint(ref);
@@ -489,6 +476,8 @@ const layerCommands: Record<string, CommandHandler> = {
     const explicitName = getFlagString(flags, ["name"]);
     const explicitParentRef = getFlagString(flags, ["parent"]);
 
+    const [first, second, third] = positional;
+
     let entrypoint: Entrypoint | null = null;
     let name: string | undefined = explicitName;
     let parentRef: string | undefined = explicitParentRef;
@@ -498,10 +487,9 @@ const layerCommands: Record<string, CommandHandler> = {
       if (!entrypoint) {
         throw new Error(`Entrypoint not found: ${explicitEntrypointRef}`);
       }
-      if (!name) name = positional[0];
-      if (!parentRef) parentRef = positional[1];
+      if (!name) name = first;
+      if (!parentRef) parentRef = second;
     } else {
-      const [first, second, third] = positional;
       const entrypoints = await api.entrypoints.list();
       if (first) {
         const candidate = selectByIdOrName(entrypoints, first) ?? selectByPath(entrypoints, first, "path");
@@ -553,25 +541,32 @@ const layerCommands: Record<string, CommandHandler> = {
 
     await confirmOrThrow(`Delete layer '${layer.name}' (${layer.id})?`, ctx.opts.force);
     await api.layers.delete(layer.id);
-    console.log(`Deleted layer ${layer.id}.`);
+
+    outputData(ctx, { ok: true, id: layer.id }, (value) => {
+      console.log(`Deleted layer ${value.id}.`);
+    });
   },
-  mount: async ({ args }) => {
-    const [ref] = args;
+  mount: async (ctx) => {
+    const [ref] = ctx.args;
     const layer = await resolveLayer(ref, null);
     if (!layer) {
       throw new Error(`Layer not found: ${ref ?? "(infer)"}`);
     }
     await api.layers.mount(layer.id);
-    console.log(`Mounted layer ${layer.id}.`);
+    outputData(ctx, { ok: true, id: layer.id }, (value) => {
+      console.log(`Mounted layer ${value.id}.`);
+    });
   },
-  unmount: async ({ args }) => {
-    const [ref] = args;
+  unmount: async (ctx) => {
+    const [ref] = ctx.args;
     const layer = await resolveLayer(ref, null);
     if (!layer) {
       throw new Error(`Layer not found: ${ref ?? "(infer)"}`);
     }
     await api.layers.unmount(layer.id);
-    console.log(`Unmounted layer ${layer.id}.`);
+    outputData(ctx, { ok: true, id: layer.id }, (value) => {
+      console.log(`Unmounted layer ${value.id}.`);
+    });
   },
   diff: async (ctx) => {
     const [ref] = ctx.args;
@@ -584,9 +579,9 @@ const layerCommands: Record<string, CommandHandler> = {
       printTable(rows.map((it) => ({ type: it.changeType, path: it.path })));
     });
   },
-};
+} satisfies Record<"list" | "create" | "delete" | "mount" | "unmount" | "diff", CommandHandler>;
 
-const mountCommands: Record<string, CommandHandler> = {
+const mountCommands = {
   list: async (ctx) => {
     const [ref] = ctx.args;
     const entrypoint = await resolveEntrypoint(ref);
@@ -658,28 +653,35 @@ const mountCommands: Record<string, CommandHandler> = {
 
     await confirmOrThrow(`Delete mount '${mount.name}' (${mount.id})?`, ctx.opts.force);
     await api.userMounts.delete(mount.id);
-    console.log(`Deleted mount ${mount.id}.`);
+
+    outputData(ctx, { ok: true, id: mount.id }, (value) => {
+      console.log(`Deleted mount ${value.id}.`);
+    });
   },
-  mount: async ({ args }) => {
-    const [ref] = args;
+  mount: async (ctx) => {
+    const [ref] = ctx.args;
     const mount = await resolveUserMount(ref, null);
     if (!mount) {
       throw new Error(`Mount not found: ${ref ?? "(infer)"}`);
     }
     await api.userMounts.mount(mount.id);
-    console.log(`Mounted user mount ${mount.id}.`);
+    outputData(ctx, { ok: true, id: mount.id }, (value) => {
+      console.log(`Mounted user mount ${value.id}.`);
+    });
   },
-  unmount: async ({ args }) => {
-    const [ref] = args;
+  unmount: async (ctx) => {
+    const [ref] = ctx.args;
     const mount = await resolveUserMount(ref, null);
     if (!mount) {
       throw new Error(`Mount not found: ${ref ?? "(infer)"}`);
     }
     await api.userMounts.unmount(mount.id);
-    console.log(`Unmounted user mount ${mount.id}.`);
+    outputData(ctx, { ok: true, id: mount.id }, (value) => {
+      console.log(`Unmounted user mount ${value.id}.`);
+    });
   },
-  attach: async ({ args }) => {
-    const [mountRef, layerRef] = args;
+  attach: async (ctx) => {
+    const [mountRef, layerRef] = ctx.args;
     const mount = await resolveUserMount(mountRef, null);
     if (!mount) {
       throw new Error(`Mount not found: ${mountRef ?? "(infer)"}`);
@@ -696,92 +698,33 @@ const mountCommands: Record<string, CommandHandler> = {
     }
 
     await api.userMounts.attachLayer({ userMountId: mount.id, layerId });
-    if (layerId) {
-      console.log(`Attached layer ${layerId} to mount ${mount.id}.`);
-    } else {
-      console.log(`Detached layer from mount ${mount.id}.`);
-    }
+    outputData(ctx, { ok: true, mountId: mount.id, layerId }, (value) => {
+      if (value.layerId) {
+        console.log(`Attached layer ${value.layerId} to mount ${value.mountId}.`);
+      } else {
+        console.log(`Detached layer from mount ${value.mountId}.`);
+      }
+    });
   },
-};
-
-const categoryCommands: Record<Category, Record<string, CommandHandler>> = {
-  entrypoint: entrypointCommands,
-  layer: layerCommands,
-  mount: mountCommands,
-  daemon: daemonCommands,
-};
-
-function printHelp(): void {
-  console.log(`Spaces CLI
-
-Commands:
-  status
-  remount
-  entrypoint|ep|e <subcommand>
-  layer|l <subcommand>
-  mount|m <subcommand>
-  daemon|d <subcommand>
-
-Global options:
-  --json       Print structured JSON output
-  --force      Skip destructive-action confirmations
-
-Examples:
-  spaces status
-  spaces entrypoint create --path /repo/base --name base
-  spaces layer create --entrypoint ep_123 --name feat-login --parent lyr_123
-  spaces mount create dev ~/worktree --entrypoint ep_123 --layer lyr_456
-  spaces mount delete mnt_123 --force
-  spaces daemon start
-
-Run "spaces <category> help" to see subcommands.
-
-Environment:
-  SPACES_API_URL (default ${DAEMON_URL})
-  SPACES_AUTH_TOKEN (optional)
-  SPACES_DAEMON_PATH (optional)
-  SPACES_STATE_DIR (optional)
-`);
-}
+} satisfies Record<"list" | "create" | "delete" | "mount" | "unmount" | "attach", CommandHandler>;
 
 function printCategoryHelp(category: Category): void {
   if (category === "entrypoint") {
-    console.log(`Entrypoint commands:
-  entrypoint list [entrypoint|path]
-  entrypoint create [path] [name] [--path <path>] [--name <name>]
-  entrypoint delete [entrypoint|path] [--force]`);
+    console.log(`Entrypoint commands:\n  entrypoint list [entrypoint|path]\n  entrypoint create [path] [name] [--path <path>] [--name <name>]\n  entrypoint delete [entrypoint|path] [--force]`);
     return;
   }
 
   if (category === "layer") {
-    console.log(`Layer commands:
-  layer list [entrypoint|path]
-  layer create [entrypoint|path] [name] [parent]
-      [--entrypoint <ref>] [--name <name>] [--parent <ref>]
-  layer delete [layer|path] [--force]
-  layer mount [layer|path]
-  layer unmount [layer|path]
-  layer diff [layer|path]`);
+    console.log(`Layer commands:\n  layer list [entrypoint|path]\n  layer create [entrypoint|path] [name] [parent]\n      [--entrypoint <ref>] [--name <name>] [--parent <ref>]\n  layer delete [layer|path] [--force]\n  layer mount [layer|path]\n  layer unmount [layer|path]\n  layer diff [layer|path]`);
     return;
   }
 
   if (category === "daemon") {
-    console.log(`Daemon commands:
-  daemon status
-  daemon start [args...]
-  daemon stop
-  daemon restart [args...]`);
+    console.log(`Daemon commands:\n  daemon status\n  daemon start [args...]\n  daemon stop\n  daemon restart [args...]`);
     return;
   }
 
-  console.log(`Mount commands:
-  mount list [entrypoint|path]
-  mount create <name> <mountPath> [entrypoint|path] [layer]
-      [--name <name>] [--path <mountPath>] [--entrypoint <ref>] [--layer <ref>]
-  mount delete [mount|path] [--force]
-  mount mount [mount|path]
-  mount unmount [mount|path]
-  mount attach <mount|path> [layer]`);
+  console.log(`Mount commands:\n  mount list [entrypoint|path]\n  mount create <name> <mountPath> [entrypoint|path] [layer]\n      [--name <name>] [--path <mountPath>|--mount-path <mountPath>] [--entrypoint <ref>] [--layer <ref>]\n  mount delete [mount|path] [--force]\n  mount mount [mount|path]\n  mount unmount [mount|path]\n  mount attach <mount|path> [layer]`);
 }
 
 function isConnectivityError(error: unknown): boolean {
@@ -810,40 +753,129 @@ function printFriendlyError(error: unknown): void {
   console.error(error instanceof Error ? error.message : String(error));
 }
 
-async function main(): Promise<void> {
-  const parsed = parseGlobalOptions(process.argv.slice(2));
-  const [first, second, ...rest] = parsed.args;
-
-  if (!first || first === "help") {
-    printHelp();
-    return;
-  }
-
-  const rootHandler = rootCommands[first];
-  if (rootHandler) {
-    await rootHandler({ args: [second, ...rest].filter((arg): arg is string => arg !== undefined), opts: parsed.opts });
-    return;
-  }
-
-  const category = categoryAliases[first];
-  if (!category) {
-    throw new Error(`Unknown command: ${first}`);
-  }
-
-  if (!second || second === "help") {
-    printCategoryHelp(category);
-    return;
-  }
-
-  const handler = categoryCommands[category][second];
-  if (!handler) {
-    throw new Error(`Unknown subcommand: ${first} ${second}`);
-  }
-
-  await handler({ args: rest, opts: parsed.opts });
+function withFriendlyErrors<Args extends unknown[]>(fn: (...args: Args) => Promise<void> | void) {
+  return (...args: Args): void => {
+    Promise.resolve(fn(...args)).catch((error) => {
+      printFriendlyError(error);
+      process.exit(1);
+    });
+  };
 }
 
-main().catch((error) => {
-  printFriendlyError(error);
+function buildCtx(rest: string[], opts: CommonOptions): CommandContext {
+  return { args: rest, opts: { json: !!opts.json, force: !!opts.force } };
+}
+
+function dispatchCategory(
+  category: Category,
+  subcommand: string | undefined,
+  rest: string[],
+  opts: CommonOptions,
+): Promise<void> {
+  const map: Record<string, CommandHandler> =
+    category === "entrypoint"
+      ? entrypointCommands
+      : category === "layer"
+      ? layerCommands
+      : category === "mount"
+      ? mountCommands
+      : daemonCommands;
+
+  if (!subcommand || subcommand === "help") {
+    printCategoryHelp(category);
+    return Promise.resolve();
+  }
+
+  const handler = map[subcommand];
+  if (!handler) {
+    throw new Error(`Unknown subcommand: ${category} ${subcommand}`);
+  }
+
+  return handler(buildCtx(rest, opts));
+}
+
+const cli = cac("spaces");
+
+cli
+  .option("-j, --json", "Print structured JSON output")
+  .option("-f, --force", "Skip destructive-action confirmations")
+  .help();
+
+cli.command("status", "Show daemon/system status").action(
+  withFriendlyErrors(async (opts: CommonOptions) => {
+    await rootCommands.status(buildCtx([], opts));
+  }),
+);
+
+cli.command("remount", "Remount all layers and user mounts").action(
+  withFriendlyErrors(async (opts: CommonOptions) => {
+    await rootCommands.remount(buildCtx([], opts));
+  }),
+);
+
+cli
+  .command("entrypoint [subcommand] [...rest]", "Entrypoint operations")
+  .alias("entrypoints")
+  .alias("ep")
+  .alias("e")
+  .allowUnknownOptions()
+  .action(
+    withFriendlyErrors(async (subcommand: string | undefined, rest: string[] = [], opts: CommonOptions) => {
+      await dispatchCategory("entrypoint", subcommand, rest, opts);
+    }),
+  );
+
+cli
+  .command("layer [subcommand] [...rest]", "Layer operations")
+  .alias("layers")
+  .alias("l")
+  .allowUnknownOptions()
+  .action(
+    withFriendlyErrors(async (subcommand: string | undefined, rest: string[] = [], opts: CommonOptions) => {
+      await dispatchCategory("layer", subcommand, rest, opts);
+    }),
+  );
+
+cli
+  .command("mount [subcommand] [...rest]", "User mount operations")
+  .alias("mounts")
+  .alias("m")
+  .allowUnknownOptions()
+  .action(
+    withFriendlyErrors(async (subcommand: string | undefined, rest: string[] = [], opts: CommonOptions) => {
+      await dispatchCategory("mount", subcommand, rest, opts);
+    }),
+  );
+
+cli
+  .command("daemon [subcommand] [...rest]", "Daemon process operations")
+  .alias("daemons")
+  .alias("d")
+  .allowUnknownOptions()
+  .action(
+    withFriendlyErrors(async (subcommand: string | undefined, rest: string[] = [], opts: CommonOptions) => {
+      await dispatchCategory("daemon", subcommand, rest, opts);
+    }),
+  );
+
+cli.example("status");
+cli.example("entrypoint create --path /repo/base --name base");
+cli.example("layer create --entrypoint ep_123 --name feat-login --parent lyr_123");
+cli.example("mount create dev ~/worktree --entrypoint ep_123 --layer lyr_456");
+cli.example("mount delete mnt_123 --force");
+cli.example("daemon start");
+
+cli.on("command:*", () => {
+  const raw = cli.args.join(" ").trim();
+  printFriendlyError(new Error(`Unknown command: ${raw || "(empty)"}`));
+  console.log();
+  cli.outputHelp();
   process.exit(1);
 });
+
+if (process.argv.length <= 2) {
+  cli.outputHelp();
+  process.exit(0);
+}
+
+cli.parse(process.argv);
