@@ -6,12 +6,14 @@ import java.nio.channels.ClosedChannelException
 import java.nio.channels.FileChannel
 import java.nio.file.*
 import java.nio.file.attribute.BasicFileAttributes
+import java.nio.file.attribute.FileTime
 import java.nio.file.attribute.PosixFileAttributes
 import java.nio.file.attribute.PosixFilePermission
 import java.nio.file.attribute.PosixFilePermissions
 import java.security.MessageDigest
 import java.time.Instant
 import java.util.Base64
+import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import javax.security.auth.Subject
 import kotlin.io.path.exists
@@ -35,16 +37,18 @@ import org.dcache.nfs.vfs.Stat
 import org.dcache.nfs.vfs.VirtualFileSystem
 import org.slf4j.LoggerFactory
 
-class SpacesVfs(
-        private val db: SpacesDatabase,
-        private val replication: ReplicationService? = null
-) : VirtualFileSystem {
+class SpacesVfs(private val db: SpacesDatabase) : VirtualFileSystem {
     private val logger = LoggerFactory.getLogger(SpacesVfs::class.java)
     private val overlay = OverlayEngine()
     private val idMapping = SimpleIdMapping()
     private val handleToPath = ConcurrentHashMap<String, String>()
     private val handleToInode = ConcurrentHashMap<String, Inode>()
     private val openWriteHandles = ConcurrentHashMap<String, OpenHandle>()
+    @Volatile private var opHandler: ((NfsOp) -> Unit)? = null
+
+    fun setOpHandler(handler: (NfsOp) -> Unit) {
+        opHandler = handler
+    }
 
     override fun access(inode: Inode, mode: Int): Int {
         val resolved = resolveNode(inode)
@@ -924,7 +928,7 @@ class SpacesVfs(
             kind: NfsOpKind,
             targetRelative: String? = null
     ) {
-        replication?.handleOp(
+        opHandler?.invoke(
                 NfsOp(
                         mountId = mount.mountId,
                         relativePath = relative,
@@ -942,6 +946,286 @@ class SpacesVfs(
         val elapsedMs = (System.nanoTime() - start) / 1_000_000
         logger.debug("{} end path={} durationMs={}", op, path, elapsedMs)
     }
+
+    // region: Layer switch invalidation
+
+    fun invalidateMountForLayerSwitch(mountPath: String, oldLayerId: String?, newLayerId: String?) {
+        val mountRoot = Paths.get(mountPath)
+        if (!Files.exists(mountRoot)) return
+
+        val oldFingerprints = dirtyFingerprintsForLayer(oldLayerId)
+        val newFingerprints = dirtyFingerprintsForLayer(newLayerId)
+        val changed = mutableListOf<String>()
+        for (path in oldFingerprints.keys + newFingerprints.keys) {
+            if (oldFingerprints[path] != newFingerprints[path]) {
+                changed.add(path)
+            }
+        }
+
+        if (changed.isNotEmpty()) {
+            val now = FileTime.from(Instant.now())
+            for (relative in changed.sorted()) {
+                val target = mountRoot.resolve(relative)
+                if (Files.exists(target)) {
+                    runCatching { Files.setLastModifiedTime(target, now) }
+                }
+                val parent = target.parent
+                if (parent != null && Files.exists(parent)) {
+                    runCatching { Files.setLastModifiedTime(parent, now) }
+                }
+            }
+        }
+
+        // Keep a deterministic mount-visible rename/touch event for watchers.
+        emitSwitchMarkerEvent(mountRoot)
+    }
+
+    private fun dirtyFingerprintsForLayer(layerId: String?): Map<String, String> {
+        if (layerId == null) return emptyMap()
+        val mountView = buildViewForLayer(layerId) ?: return emptyMap()
+        val dirtyPaths = dirtyPathsForLayer(layerId)
+        val result = mutableMapOf<String, String>()
+        for (relative in dirtyPaths) {
+            if (relative.isBlank()) continue
+            result[relative] = fingerprintPath(mountView.view, relative)
+        }
+        return result
+    }
+
+    private fun dirtyPathsForLayer(layerId: String): Set<String> {
+        val layer = db.getLayer(layerId) ?: return emptySet()
+        val entrypoint = db.getEntrypoint(layer.entrypointId) ?: return emptySet()
+        val upperRoot = Paths.get(layer.upperDir)
+        val entryRoot = Paths.get(entrypoint.path)
+        val entries = mutableSetOf<String>()
+        if (Files.exists(upperRoot)) {
+            collectDirtyPaths(upperRoot, upperRoot, entryRoot, entries)
+        }
+        return entries
+    }
+
+    private fun collectDirtyPaths(
+            upperRoot: Path,
+            current: Path,
+            entryRoot: Path,
+            entries: MutableSet<String>
+    ) {
+        Files.newDirectoryStream(current).use { stream ->
+            for (entry in stream) {
+                val rel = upperRoot.relativize(entry)
+                val name = entry.fileName.toString()
+                if (name == OPAQUE_MARKER) continue
+                val whiteout = isWhiteoutMarker(name)
+                if (whiteout != null) {
+                    val deletePath = rel.parent?.resolve(whiteout) ?: Paths.get(whiteout)
+                    entries.add(deletePath.toString())
+                    continue
+                }
+
+                val entrypointPath = entryRoot.resolve(rel)
+                if (Files.exists(entrypointPath)) {
+                    entries.add(rel.toString())
+                } else {
+                    entries.add(rel.toString())
+                }
+                if (Files.isDirectory(entry)) {
+                    collectDirtyPaths(upperRoot, entry, entryRoot, entries)
+                }
+            }
+        }
+    }
+
+    private fun fingerprintPath(view: OverlayView, relative: String): String {
+        val resolved = overlay.resolvePath(view, relative) ?: return "missing"
+        val source = resolved.source
+        return when {
+            Files.isDirectory(source) -> {
+                val entries = overlay.listDir(view, relative).sorted().joinToString("\n")
+                "dir:${sha256Bytes(entries.toByteArray())}"
+            }
+            Files.isSymbolicLink(source) -> {
+                val target =
+                        runCatching { Files.readSymbolicLink(source).toString() }.getOrDefault("")
+                "symlink:$target"
+            }
+            else -> "file:${sha256File(source)}"
+        }
+    }
+
+    private fun emitSwitchMarkerEvent(mountRoot: Path) {
+        if (!Files.exists(mountRoot)) return
+        val now = FileTime.from(Instant.now())
+        val marker = mountRoot.resolve(".spaces-hot-reload")
+        val temp = mountRoot.resolve(".spaces-hot-reload.${UUID.randomUUID()}")
+        runCatching {
+            Files.writeString(
+                    temp,
+                    now.toMillis().toString(),
+                    StandardOpenOption.CREATE,
+                    StandardOpenOption.TRUNCATE_EXISTING,
+                    StandardOpenOption.WRITE
+            )
+            Files.move(temp, marker, StandardCopyOption.REPLACE_EXISTING)
+            Files.setLastModifiedTime(marker, now)
+            Files.setLastModifiedTime(mountRoot, now)
+        }
+                .onFailure {
+                    runCatching {
+                        if (!Files.exists(marker)) {
+                            Files.createFile(marker)
+                        }
+                        Files.setLastModifiedTime(marker, now)
+                    }
+                }
+    }
+
+    private fun sha256File(path: Path): String {
+        val digest = MessageDigest.getInstance("SHA-256")
+        Files.newInputStream(path).use { stream ->
+            val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+            while (true) {
+                val read = stream.read(buffer)
+                if (read <= 0) break
+                digest.update(buffer, 0, read)
+            }
+        }
+        return digest.digest().joinToString("") { "%02x".format(it) }
+    }
+
+    private fun sha256Bytes(bytes: ByteArray): String {
+        val digest = MessageDigest.getInstance("SHA-256").digest(bytes)
+        return digest.joinToString("") { "%02x".format(it) }
+    }
+
+    // endregion
+
+    // region: Replay
+
+    fun replay(sourceMountId: String, targetMountId: String, op: NfsOp) {
+        // Source is resolved through the in-process overlay model so replay reads never traverse
+        // exported NFS mount paths (avoids self-reentrant NFS reads during replication).
+        val sourceMount = buildMountViewById(sourceMountId) ?: return
+        // Target writes intentionally go through the target mount path to surface real filesystem
+        // change notifications for external watchers (dev servers, hot-reload tooling).
+        val targetRoot = mountPathForId(targetMountId) ?: return
+
+        when (op.kind) {
+            NfsOpKind.Remove, NfsOpKind.Rmdir ->
+                    replayDelete(Paths.get(targetRoot), op.relativePath)
+            NfsOpKind.Rename -> {
+                val toRelative = op.targetRelativePath ?: return
+                val sourcePath = overlay.resolvePath(sourceMount.view, toRelative)?.source
+                replayRename(
+                        sourceMount,
+                        sourcePath,
+                        Paths.get(targetRoot),
+                        op.relativePath,
+                        toRelative
+                )
+            }
+            NfsOpKind.Create, NfsOpKind.Write, NfsOpKind.Mkdir, NfsOpKind.Setattr ->
+                    replayUpsert(sourceMount, Paths.get(targetRoot), op.relativePath)
+        }
+    }
+
+    private fun buildMountViewById(mountId: String): MountView? {
+        return buildViewForUserMount(mountId) ?: buildViewForLayer(mountId)
+    }
+
+    private fun mountPathForId(mountId: String): String? {
+        val userMount = db.getUserMount(mountId)
+        if (userMount != null) return userMount.mountPath
+        val layer = db.getLayer(mountId)
+        return layer?.mountPath
+    }
+
+    private fun replayUpsert(sourceMount: MountView, targetRoot: Path, relative: String) {
+        val source = overlay.resolvePath(sourceMount.view, relative)?.source
+        if (source == null) return
+        val target = targetRoot.resolve(relative)
+        if (Files.isDirectory(source)) {
+            replayDirectoryView(sourceMount, targetRoot, relative)
+            return
+        }
+        copyFile(source, target)
+    }
+
+    private fun replayDelete(targetRoot: Path, relative: String) {
+        val target = targetRoot.resolve(relative)
+        deletePath(target)
+    }
+
+    private fun replayRename(
+            sourceMount: MountView,
+            sourcePath: Path?,
+            targetRoot: Path,
+            fromRelative: String,
+            toRelative: String
+    ) {
+        val targetFrom = targetRoot.resolve(fromRelative)
+        val targetTo = targetRoot.resolve(toRelative)
+        if (targetFrom != targetTo && Files.exists(targetFrom)) {
+            val parent = targetTo.parent
+            if (parent != null) {
+                Files.createDirectories(parent)
+            }
+            runCatching { Files.move(targetFrom, targetTo, StandardCopyOption.REPLACE_EXISTING) }
+                    .onSuccess {
+                        return
+                    }
+        }
+
+        if (sourcePath != null && Files.exists(sourcePath)) {
+            replayUpsert(sourceMount, targetRoot, toRelative)
+        }
+        if (targetFrom != targetTo) {
+            deletePath(targetFrom)
+        }
+    }
+
+    private fun replayDirectoryView(sourceMount: MountView, targetRoot: Path, relative: String) {
+        // Enumerate the directory through overlay view semantics, not a single concrete dir.
+        // This preserves parent/lower visibility when the top upper is only a partial delta.
+        val targetDir = targetRoot.resolve(relative)
+        Files.createDirectories(targetDir)
+        val entries = overlay.listDir(sourceMount.view, relative)
+        for (name in entries) {
+            val childRelative = if (relative.isBlank()) name else "$relative/$name"
+            val childSource =
+                    overlay.resolvePath(sourceMount.view, childRelative)?.source ?: continue
+            val childTarget = targetRoot.resolve(childRelative)
+            if (Files.isDirectory(childSource)) {
+                replayDirectoryView(sourceMount, targetRoot, childRelative)
+            } else {
+                copyFile(childSource, childTarget)
+            }
+        }
+    }
+
+    private fun copyFile(source: Path, target: Path) {
+        if (!Files.exists(source) || Files.isDirectory(source)) return
+        val parent = target.parent
+        if (parent != null) {
+            Files.createDirectories(parent)
+        }
+        Files.copy(
+                source,
+                target,
+                StandardCopyOption.REPLACE_EXISTING,
+                StandardCopyOption.COPY_ATTRIBUTES
+        )
+    }
+
+    private fun deletePath(target: Path) {
+        if (!Files.exists(target)) return
+        if (Files.isDirectory(target)) {
+            target.toFile().deleteRecursively()
+        } else {
+            Files.deleteIfExists(target)
+        }
+    }
+
+    // endregion
 }
 
 private data class OpenHandle(val channel: FileChannel, val path: Path)

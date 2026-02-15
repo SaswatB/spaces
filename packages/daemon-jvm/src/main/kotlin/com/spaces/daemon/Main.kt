@@ -22,11 +22,15 @@ fun main() {
     val config = Config.fromEnv()
     val db = SpacesDatabase(config.dbPath)
     db.initialize()
+
+    val vfs = SpacesVfs(db)
     val replicationEngine = ReplicationEngine()
-    val replicationService = ReplicationService(db, replicationEngine)
+    val replicationService = ReplicationService(db, replicationEngine, vfs)
+    vfs.setOpHandler(replicationService::handleOp)
+
     val mountManager = MountManager(config)
     val service = SpacesService(config, db, mountManager, replicationService)
-    val nfsServer = NfsServer(config, db, replicationService)
+    val nfsServer = NfsServer(config, db, vfs)
     nfsServer.start()
 
     thread(start = true, name = "spaces-remount") { runCatching { service.remountAll() } }
@@ -226,6 +230,7 @@ fun main() {
 }
 
 @Serializable data class HealthResponse(val status: String)
+
 @Serializable data class SuccessResponse(val success: Boolean = true)
 
 @Serializable
@@ -240,7 +245,8 @@ data class Config(
     companion object {
         fun fromEnv(): Config {
             val userHome = System.getProperty("user.home")
-            val defaultDataDir = if (userHome.isNullOrBlank()) "/var/lib/spaces" else "$userHome/.spaces"
+            val defaultDataDir =
+                    if (userHome.isNullOrBlank()) "/var/lib/spaces" else "$userHome/.spaces"
             val dataDir = env("SPACES_DATA_DIR", defaultDataDir)
             val dbPath = env("SPACES_DB_PATH", "$dataDir/spaces.db")
             val apiHost = env("SPACES_API_HOST", "127.0.0.1")
@@ -264,6 +270,5 @@ data class Config(
             }
             return value.trim()
         }
-
     }
 }

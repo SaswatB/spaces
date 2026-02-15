@@ -1,20 +1,9 @@
 package com.spaces.daemon
 
-import java.nio.file.*
-import java.nio.file.attribute.BasicFileAttributes
-import java.nio.file.attribute.PosixFileAttributeView
-import java.nio.file.attribute.PosixFileAttributes
 import java.time.Duration
 import java.time.Instant
 import java.util.concurrent.ConcurrentHashMap
-
-enum class FileChangeType {
-    Add,
-    Modify,
-    Delete
-}
-
-data class FileChange(val type: FileChangeType, val relativePath: String)
+import java.util.concurrent.Executors
 
 data class NfsOp(
         val mountId: String,
@@ -53,56 +42,33 @@ class ReplicationEngine {
     }
 }
 
-data class MountTarget(val mountId: String, val path: String)
+class ReplicationService(
+        private val db: SpacesDatabase,
+        private val engine: ReplicationEngine,
+        private val vfs: SpacesVfs
+) {
+    private val replayDispatch = Executors.newSingleThreadExecutor()
 
-class ReplicationService(private val db: SpacesDatabase, private val engine: ReplicationEngine) {
     fun handleOp(op: NfsOp) {
-        val sourceRoot = mountPathForId(op.mountId) ?: return
         val layerId = resolveLayerId(op.mountId) ?: return
         val suppressionKey = suppressionKey(op)
         if (engine.isSuppressed(suppressionKey)) {
             return
         }
-        val targetRoots = mountTargetsForLayer(layerId)
-        if (op.kind == NfsOpKind.Rename) {
-            val toRelative = op.targetRelativePath ?: return
-            for (target in targetRoots) {
-                if (target.path == sourceRoot) continue
-                val targetKey =
-                        suppressionKey(op.copy(mountId = target.mountId, targetRelativePath = toRelative))
-                engine.suppress(targetKey)
-                replayRename(
-                        Paths.get(sourceRoot),
-                        Paths.get(target.path),
-                        op.relativePath,
-                        toRelative
-                )
-            }
-            return
-        }
-
-        val changeType =
-                when (op.kind) {
-                    NfsOpKind.Create,
-                    NfsOpKind.Write,
-                    NfsOpKind.Mkdir,
-                    NfsOpKind.Setattr,
-                    NfsOpKind.Rename -> FileChangeType.Modify
-                    NfsOpKind.Remove, NfsOpKind.Rmdir -> FileChangeType.Delete
-                }
-        val change = FileChange(changeType, op.relativePath)
-        for (target in targetRoots) {
-            if (target.path == sourceRoot) continue
-            val targetKey = suppressionKey(op.copy(mountId = target.mountId))
+        val targetMountIds = mountTargetsForLayer(layerId)
+        for (targetMountId in targetMountIds) {
+            if (targetMountId == op.mountId) continue
+            val targetKey = suppressionKey(op.copy(mountId = targetMountId))
             engine.suppress(targetKey)
-            replayChange(change, Paths.get(sourceRoot), Paths.get(target.path))
+            // Dispatch replay off the serving NFS thread.
+            // Replay can touch mount paths to generate watcher-visible fs events, and we do not
+            // want that I/O to synchronously re-enter NFS handling for the current request.
+            replayDispatch.execute { runCatching { vfs.replay(op.mountId, targetMountId, op) } }
         }
     }
 
-    fun reconcileTrees(sourceRoot: Path, targetRoot: Path) {
-        if (!Files.exists(sourceRoot)) return
-        copyDirectoryContents(sourceRoot, targetRoot, sourceRoot)
-        deleteRemovedEntries(sourceRoot, targetRoot)
+    fun handleLayerSwitchInvalidation(mountPath: String, oldLayerId: String?, newLayerId: String?) {
+        vfs.invalidateMountForLayerSwitch(mountPath, oldLayerId, newLayerId)
     }
 
     private fun resolveLayerId(mountId: String): String? {
@@ -113,163 +79,22 @@ class ReplicationService(private val db: SpacesDatabase, private val engine: Rep
         return if (db.getLayer(mountId) != null) mountId else null
     }
 
-    private fun mountPathForId(mountId: String): String? {
-        val userMount = db.getUserMount(mountId)
-        if (userMount != null) {
-            return userMount.mountPath
-        }
-        val layer = db.getLayer(mountId)
-        return layer?.mountPath
-    }
-
-    private fun mountTargetsForLayer(layerId: String): List<MountTarget> {
-        val targets = mutableListOf<MountTarget>()
+    private fun mountTargetsForLayer(layerId: String): List<String> {
+        val targets = mutableListOf<String>()
         val layer = db.getLayer(layerId)
         if (layer != null) {
-            targets.add(MountTarget(layer.id, layer.mountPath))
+            targets.add(layer.id)
         }
         val mounts = db.listUserMountsByLayer(layerId)
         for (mount in mounts) {
-            targets.add(MountTarget(mount.id, mount.mountPath))
+            targets.add(mount.id)
         }
         return targets
     }
 
-    private fun replayChange(change: FileChange, sourceRoot: Path, targetRoot: Path) {
-        val sourcePath = sourceRoot.resolve(change.relativePath)
-        val targetPath = targetRoot.resolve(change.relativePath)
-        when (change.type) {
-            FileChangeType.Add, FileChangeType.Modify -> copyPath(sourcePath, targetPath)
-            FileChangeType.Delete -> deletePath(targetPath)
-        }
-    }
-
-    private fun replayRename(sourceRoot: Path, targetRoot: Path, fromRelative: String, toRelative: String) {
-        val sourcePath = sourceRoot.resolve(toRelative)
-        val targetFrom = targetRoot.resolve(fromRelative)
-        val targetTo = targetRoot.resolve(toRelative)
-        if (targetFrom != targetTo && Files.exists(targetFrom)) {
-            val parent = targetTo.parent
-            if (parent != null) {
-                Files.createDirectories(parent)
-            }
-            runCatching {
-                        Files.move(
-                                targetFrom,
-                                targetTo,
-                                StandardCopyOption.REPLACE_EXISTING
-                        )
-                    }
-                    .onSuccess { return }
-        }
-
-        if (Files.exists(sourcePath)) {
-            copyPath(sourcePath, targetTo)
-        }
-        if (targetFrom != targetTo) {
-            deletePath(targetFrom)
-        }
-    }
-
-    private fun copyPath(source: Path, target: Path) {
-        if (!Files.exists(source)) return
-        if (Files.isDirectory(source)) {
-            Files.createDirectories(target)
-            applyMetadata(target, source)
-            copyDirectoryContents(source, target, source)
-            deleteRemovedEntries(source, target)
-            return
-        }
-        val parent = target.parent
-        if (parent != null) {
-            Files.createDirectories(parent)
-        }
-        Files.copy(
-                source,
-                target,
-                StandardCopyOption.REPLACE_EXISTING,
-                StandardCopyOption.COPY_ATTRIBUTES
-        )
-        applyMetadata(target, source)
-    }
-
     private fun suppressionKey(op: NfsOp): String {
-        val renameSuffix = if (op.kind == NfsOpKind.Rename) ":${op.targetRelativePath.orEmpty()}" else ""
+        val renameSuffix =
+                if (op.kind == NfsOpKind.Rename) ":${op.targetRelativePath.orEmpty()}" else ""
         return "${op.mountId}:${op.relativePath}:${op.kind}$renameSuffix"
-    }
-
-    private fun deletePath(target: Path) {
-        if (!Files.exists(target)) return
-        if (Files.isDirectory(target)) {
-            target.toFile().deleteRecursively()
-        } else {
-            Files.deleteIfExists(target)
-        }
-    }
-
-    private fun copyDirectoryContents(source: Path, target: Path, root: Path) {
-        if (!Files.exists(source)) return
-        Files.newDirectoryStream(source).use { stream ->
-            for (entry in stream) {
-                val relative = root.relativize(entry)
-                val targetPath = target.resolve(relative)
-                if (Files.isDirectory(entry)) {
-                    Files.createDirectories(targetPath)
-                    applyMetadata(targetPath, entry)
-                    copyDirectoryContents(entry, target, root)
-                } else {
-                    Files.createDirectories(targetPath.parent)
-                    Files.copy(
-                            entry,
-                            targetPath,
-                            StandardCopyOption.REPLACE_EXISTING,
-                            StandardCopyOption.COPY_ATTRIBUTES
-                    )
-                    applyMetadata(targetPath, entry)
-                }
-            }
-        }
-    }
-
-    private fun deleteRemovedEntries(sourceRoot: Path, targetRoot: Path) {
-        if (!Files.exists(targetRoot)) return
-        Files.newDirectoryStream(targetRoot).use { stream ->
-            for (entry in stream) {
-                val relative = targetRoot.relativize(entry)
-                val sourcePath = sourceRoot.resolve(relative)
-                if (!Files.exists(sourcePath)) {
-                    deletePath(entry)
-                } else if (Files.isDirectory(entry)) {
-                    deleteRemovedEntries(sourcePath, entry)
-                }
-            }
-        }
-    }
-
-    private fun applyMetadata(target: Path, source: Path) {
-        val attrs = Files.readAttributes(source, BasicFileAttributes::class.java)
-        val perms =
-                try {
-                    Files.getPosixFilePermissions(source)
-                } catch (_: Exception) {
-                    null
-                }
-        if (perms != null) {
-            Files.setPosixFilePermissions(target, perms)
-        }
-        val ownerAttrs =
-                try {
-                    Files.readAttributes(source, PosixFileAttributes::class.java)
-                } catch (_: Exception) {
-                    null
-                }
-        val view = Files.getFileAttributeView(target, PosixFileAttributeView::class.java)
-        if (view != null) {
-            view.setTimes(attrs.lastModifiedTime(), attrs.lastAccessTime(), attrs.creationTime())
-            if (ownerAttrs != null) {
-                view.setOwner(ownerAttrs.owner())
-                view.setGroup(ownerAttrs.group())
-            }
-        }
     }
 }

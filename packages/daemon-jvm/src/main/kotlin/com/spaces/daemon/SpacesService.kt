@@ -175,7 +175,6 @@ class SpacesService(
             val layer = db.getLayer(attachedLayerId)
             if (layer != null) {
                 mountLayer(layer)
-                replication.reconcileTrees(Paths.get(layer.mountPath), Paths.get(record.mountPath))
             }
         }
         return record.toUserMountResponse(mountStatus(mountPath))
@@ -193,6 +192,7 @@ class SpacesService(
         val mount =
                 db.getUserMount(userMountId)
                         ?: throw IllegalArgumentException("User mount not found")
+        val oldLayerId = mount.attachedLayerId
         if (layerId != null) {
             val layer = db.getLayer(layerId) ?: throw IllegalArgumentException("Layer not found")
             if (layer.entrypointId != mount.entrypointId) {
@@ -201,13 +201,15 @@ class SpacesService(
         }
         val now = nowSeconds()
         db.updateUserMountLayer(userMountId, layerId, now)
+        val updated = db.getUserMount(userMountId)
         if (layerId != null) {
             val layer = db.getLayer(layerId)
-            val updated = db.getUserMount(userMountId)
-            if (layer != null && updated != null) {
+            if (layer != null) {
                 mountLayer(layer)
-                replication.reconcileTrees(Paths.get(layer.mountPath), Paths.get(updated.mountPath))
             }
+        }
+        if (updated != null && oldLayerId != layerId) {
+            replication.handleLayerSwitchInvalidation(updated.mountPath, oldLayerId, layerId)
         }
     }
 

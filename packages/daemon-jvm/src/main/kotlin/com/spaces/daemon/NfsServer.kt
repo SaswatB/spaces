@@ -9,7 +9,7 @@ import org.dcache.oncrpc4j.rpc.OncRpcSvcBuilder
 class NfsServer(
         private val config: Config,
         private val db: SpacesDatabase,
-        private val replication: ReplicationService
+        private val vfs: SpacesVfs,
 ) {
     private var rpcService: OncRpcSvc? = null
 
@@ -17,7 +17,7 @@ class NfsServer(
         val nfs4 =
                 NFSServerV41.Builder()
                         .withExportTable(SpacesExportTable())
-                        .withVfs(SpacesVfs(db, replication))
+                        .withVfs(vfs)
                         .withOperationExecutor(SpacesOperationExecutor())
                         .withLockManager(SimpleLm())
                         .build()
