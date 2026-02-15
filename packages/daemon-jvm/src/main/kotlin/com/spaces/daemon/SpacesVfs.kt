@@ -16,6 +16,7 @@ import java.util.concurrent.ConcurrentHashMap
 import javax.security.auth.Subject
 import kotlin.io.path.exists
 import org.dcache.nfs.status.ExistException
+import org.dcache.nfs.status.InvalException
 import org.dcache.nfs.status.NoEntException
 import org.dcache.nfs.status.NotDirException
 import org.dcache.nfs.status.NotEmptyException
@@ -102,12 +103,14 @@ class SpacesVfs(
                         else -> throw NoEntException()
                     }
             NodeKind.LAYERS_DIR -> {
-                if (db.getLayer(path) == null) throw NoEntException()
-                inodeForVirtualPath("/", prefixPath("layers/$path"))
+                val layerId = validatePathComponent(path)
+                if (db.getLayer(layerId) == null) throw NoEntException()
+                inodeForVirtualPath("/", prefixPath("layers/$layerId"))
             }
             NodeKind.MOUNTS_DIR -> {
-                if (db.getUserMount(path) == null) throw NoEntException()
-                inodeForVirtualPath("/", prefixPath("mounts/$path"))
+                val mountId = validatePathComponent(path)
+                if (db.getUserMount(mountId) == null) throw NoEntException()
+                inodeForVirtualPath("/", prefixPath("mounts/$mountId"))
             }
             NodeKind.LAYER_ROOT, NodeKind.MOUNT_ROOT, NodeKind.OVERLAY -> {
                 val mount = resolved.mountView ?: throw NoEntException()
@@ -260,7 +263,7 @@ class SpacesVfs(
         Files.move(source, target, StandardCopyOption.REPLACE_EXISTING)
         logOpEnd("MOVE", "${source} -> ${target}", start)
         updateHandlePathsForMove(fromResolved.mountPath, fromRel, toRel)
-        emitOp(mount, fromRel, NfsOpKind.Rename)
+        emitOp(mount, fromRel, NfsOpKind.Rename, toRel)
         return true
     }
 
@@ -767,8 +770,18 @@ class SpacesVfs(
     }
 
     private fun resolveChildRelative(parent: ResolvedNode, name: String): String {
-        return if (parent.relativePath.isBlank()) name
-        else parent.relativePath.trimEnd('/') + "/" + name
+        val component = validatePathComponent(name)
+        return if (parent.relativePath.isBlank()) component
+        else parent.relativePath.trimEnd('/') + "/" + component
+    }
+
+    private fun validatePathComponent(name: String): String {
+        if (name.isBlank()) throw InvalException()
+        if (name == "." || name == "..") throw InvalException()
+        if (name.contains('/') || name.contains('\\') || name.contains('\u0000')) {
+            throw InvalException()
+        }
+        return name
     }
 
     private fun prefixPath(relative: String): String {
@@ -905,8 +918,20 @@ class SpacesVfs(
         }
     }
 
-    private fun emitOp(mount: MountView, relative: String, kind: NfsOpKind) {
-        replication?.handleOp(NfsOp(mount.mountId, relative, kind))
+    private fun emitOp(
+            mount: MountView,
+            relative: String,
+            kind: NfsOpKind,
+            targetRelative: String? = null
+    ) {
+        replication?.handleOp(
+                NfsOp(
+                        mountId = mount.mountId,
+                        relativePath = relative,
+                        kind = kind,
+                        targetRelativePath = targetRelative
+                )
+        )
     }
 
     private fun logOpStart(op: String, path: String) {

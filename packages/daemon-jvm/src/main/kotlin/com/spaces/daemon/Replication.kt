@@ -16,7 +16,12 @@ enum class FileChangeType {
 
 data class FileChange(val type: FileChangeType, val relativePath: String)
 
-data class NfsOp(val mountId: String, val relativePath: String, val kind: NfsOpKind)
+data class NfsOp(
+        val mountId: String,
+        val relativePath: String,
+        val kind: NfsOpKind,
+        val targetRelativePath: String? = null
+)
 
 enum class NfsOpKind {
     Create,
@@ -54,6 +59,28 @@ class ReplicationService(private val db: SpacesDatabase, private val engine: Rep
     fun handleOp(op: NfsOp) {
         val sourceRoot = mountPathForId(op.mountId) ?: return
         val layerId = resolveLayerId(op.mountId) ?: return
+        val suppressionKey = suppressionKey(op)
+        if (engine.isSuppressed(suppressionKey)) {
+            return
+        }
+        val targetRoots = mountTargetsForLayer(layerId)
+        if (op.kind == NfsOpKind.Rename) {
+            val toRelative = op.targetRelativePath ?: return
+            for (target in targetRoots) {
+                if (target.path == sourceRoot) continue
+                val targetKey =
+                        suppressionKey(op.copy(mountId = target.mountId, targetRelativePath = toRelative))
+                engine.suppress(targetKey)
+                replayRename(
+                        Paths.get(sourceRoot),
+                        Paths.get(target.path),
+                        op.relativePath,
+                        toRelative
+                )
+            }
+            return
+        }
+
         val changeType =
                 when (op.kind) {
                     NfsOpKind.Create,
@@ -64,14 +91,9 @@ class ReplicationService(private val db: SpacesDatabase, private val engine: Rep
                     NfsOpKind.Remove, NfsOpKind.Rmdir -> FileChangeType.Delete
                 }
         val change = FileChange(changeType, op.relativePath)
-        val suppressionKey = "${op.mountId}:${op.relativePath}:${op.kind}"
-        if (engine.isSuppressed(suppressionKey)) {
-            return
-        }
-        val targetRoots = mountTargetsForLayer(layerId)
         for (target in targetRoots) {
             if (target.path == sourceRoot) continue
-            val targetKey = "${target.mountId}:${op.relativePath}:${op.kind}"
+            val targetKey = suppressionKey(op.copy(mountId = target.mountId))
             engine.suppress(targetKey)
             replayChange(change, Paths.get(sourceRoot), Paths.get(target.path))
         }
@@ -122,22 +144,58 @@ class ReplicationService(private val db: SpacesDatabase, private val engine: Rep
         }
     }
 
+    private fun replayRename(sourceRoot: Path, targetRoot: Path, fromRelative: String, toRelative: String) {
+        val sourcePath = sourceRoot.resolve(toRelative)
+        val targetFrom = targetRoot.resolve(fromRelative)
+        val targetTo = targetRoot.resolve(toRelative)
+        if (targetFrom != targetTo && Files.exists(targetFrom)) {
+            val parent = targetTo.parent
+            if (parent != null) {
+                Files.createDirectories(parent)
+            }
+            runCatching {
+                        Files.move(
+                                targetFrom,
+                                targetTo,
+                                StandardCopyOption.REPLACE_EXISTING
+                        )
+                    }
+                    .onSuccess { return }
+        }
+
+        if (Files.exists(sourcePath)) {
+            copyPath(sourcePath, targetTo)
+        }
+        if (targetFrom != targetTo) {
+            deletePath(targetFrom)
+        }
+    }
+
     private fun copyPath(source: Path, target: Path) {
+        if (!Files.exists(source)) return
         if (Files.isDirectory(source)) {
             Files.createDirectories(target)
             applyMetadata(target, source)
+            copyDirectoryContents(source, target, source)
+            deleteRemovedEntries(source, target)
             return
         }
-        Files.createDirectories(target.parent)
-        if (Files.exists(source)) {
-            Files.copy(
-                    source,
-                    target,
-                    StandardCopyOption.REPLACE_EXISTING,
-                    StandardCopyOption.COPY_ATTRIBUTES
-            )
-            applyMetadata(target, source)
+        val parent = target.parent
+        if (parent != null) {
+            Files.createDirectories(parent)
         }
+        Files.copy(
+                source,
+                target,
+                StandardCopyOption.REPLACE_EXISTING,
+                StandardCopyOption.COPY_ATTRIBUTES
+        )
+        applyMetadata(target, source)
+    }
+
+    private fun suppressionKey(op: NfsOp): String {
+        val renameSuffix = if (op.kind == NfsOpKind.Rename) ":${op.targetRelativePath.orEmpty()}" else ""
+        return "${op.mountId}:${op.relativePath}:${op.kind}$renameSuffix"
     }
 
     private fun deletePath(target: Path) {
