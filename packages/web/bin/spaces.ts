@@ -766,6 +766,29 @@ function buildCtx(rest: string[], opts: CommonOptions): CommandContext {
   return { args: rest, opts: { json: !!opts.json, force: !!opts.force } };
 }
 
+function optionArgsFromOpts(opts: Record<string, unknown>, knownKeys: string[]): string[] {
+  const known = new Set([...knownKeys, "_", "--", "j", "f", "h", "help"]);
+  const args: string[] = [];
+
+  for (const [rawKey, rawValue] of Object.entries(opts)) {
+    if (known.has(rawKey)) continue;
+    if (!/^[a-zA-Z][a-zA-Z0-9]*$/.test(rawKey)) continue;
+    if (rawValue === undefined || rawValue === null || rawValue === false) continue;
+
+    const key = rawKey.replace(/[A-Z]/g, (char) => `-${char.toLowerCase()}`);
+    const flag = `--${key}`;
+
+    if (rawValue === true) {
+      args.push(flag);
+      continue;
+    }
+
+    args.push(flag, String(rawValue));
+  }
+
+  return args;
+}
+
 function dispatchCategory(
   category: Category,
   subcommand: string | undefined,
@@ -821,7 +844,8 @@ cli
   .allowUnknownOptions()
   .action(
     withFriendlyErrors(async (subcommand: string | undefined, rest: string[] = [], opts: CommonOptions) => {
-      await dispatchCategory("entrypoint", subcommand, rest, opts);
+      const merged = [...rest, ...optionArgsFromOpts(opts as Record<string, unknown>, ["json", "force"])];
+      await dispatchCategory("entrypoint", subcommand, merged, opts);
     }),
   );
 
@@ -832,7 +856,8 @@ cli
   .allowUnknownOptions()
   .action(
     withFriendlyErrors(async (subcommand: string | undefined, rest: string[] = [], opts: CommonOptions) => {
-      await dispatchCategory("layer", subcommand, rest, opts);
+      const merged = [...rest, ...optionArgsFromOpts(opts as Record<string, unknown>, ["json", "force"])];
+      await dispatchCategory("layer", subcommand, merged, opts);
     }),
   );
 
@@ -843,7 +868,8 @@ cli
   .allowUnknownOptions()
   .action(
     withFriendlyErrors(async (subcommand: string | undefined, rest: string[] = [], opts: CommonOptions) => {
-      await dispatchCategory("mount", subcommand, rest, opts);
+      const merged = [...rest, ...optionArgsFromOpts(opts as Record<string, unknown>, ["json", "force"])];
+      await dispatchCategory("mount", subcommand, merged, opts);
     }),
   );
 
@@ -854,7 +880,8 @@ cli
   .allowUnknownOptions()
   .action(
     withFriendlyErrors(async (subcommand: string | undefined, rest: string[] = [], opts: CommonOptions) => {
-      await dispatchCategory("daemon", subcommand, rest, opts);
+      const merged = [...rest, ...optionArgsFromOpts(opts as Record<string, unknown>, ["json", "force"])];
+      await dispatchCategory("daemon", subcommand, merged, opts);
     }),
   );
 

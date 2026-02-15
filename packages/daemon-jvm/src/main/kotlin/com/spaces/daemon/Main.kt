@@ -82,7 +82,7 @@ fun main() {
                     get("/system/status") { call.respond(service.status()) }
                     post("/system/remount") {
                         service.remountAll()
-                        call.respond(HttpStatusCode.OK)
+                        call.respond(HttpStatusCode.OK, SuccessResponse())
                     }
 
                     get("/entrypoints") { call.respond(service.listEntrypoints()) }
@@ -146,7 +146,7 @@ fun main() {
                         val layer =
                                 db.getLayer(id) ?: throw NoSuchElementException("Layer not found")
                         service.mountLayer(layer)
-                        call.respond(HttpStatusCode.OK)
+                        call.respond(HttpStatusCode.OK, SuccessResponse())
                     }
                     post("/layers/{id}/unmount") {
                         val id =
@@ -155,7 +155,7 @@ fun main() {
                         val layer =
                                 db.getLayer(id) ?: throw NoSuchElementException("Layer not found")
                         service.unmountLayer(layer)
-                        call.respond(HttpStatusCode.OK)
+                        call.respond(HttpStatusCode.OK, SuccessResponse())
                     }
                     get("/layers/{id}/diff") {
                         val id =
@@ -203,7 +203,7 @@ fun main() {
                                 db.getUserMount(id)
                                         ?: throw NoSuchElementException("User mount not found")
                         service.mountUserMount(mount)
-                        call.respond(HttpStatusCode.OK)
+                        call.respond(HttpStatusCode.OK, SuccessResponse())
                     }
                     post("/user-mounts/{id}/unmount") {
                         val id =
@@ -213,12 +213,12 @@ fun main() {
                                 db.getUserMount(id)
                                         ?: throw NoSuchElementException("User mount not found")
                         service.unmountUserMount(mount)
-                        call.respond(HttpStatusCode.OK)
+                        call.respond(HttpStatusCode.OK, SuccessResponse())
                     }
                     post("/user-mounts/attach") {
                         val payload = call.receive<AttachLayerRequest>()
                         service.attachLayer(payload.userMountId, payload.layerId)
-                        call.respond(HttpStatusCode.OK)
+                        call.respond(HttpStatusCode.OK, SuccessResponse())
                     }
                 }
             }
@@ -226,6 +226,7 @@ fun main() {
 }
 
 @Serializable data class HealthResponse(val status: String)
+@Serializable data class SuccessResponse(val success: Boolean = true)
 
 @Serializable
 data class Config(

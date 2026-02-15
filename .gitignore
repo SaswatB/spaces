@@ -5,6 +5,7 @@ node_modules/
 dist/
 .output/
 .vinxi/
+release/
 
 # Generated files
 *.gen.ts
