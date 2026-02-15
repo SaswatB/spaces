@@ -9,6 +9,9 @@ It covers:
 - root/system commands
 - entrypoint/layer/mount CRUD flows
 - alias/flag behavior (`e`, `--mount-path`, `--force`, `--json`)
+- watcher-sensitive layer attach flows (switch, detach/reattach, no-op attach)
+- layer-switch delta semantics (add/remove/rename + nested subtree content)
+- CLI validation failures (unknown flags, cross-entrypoint attach, non-interactive delete without `--force`)
 
 ## Prerequisites
 
@@ -33,6 +36,15 @@ This script:
 - extracts bundled-runtime `spacesd`
 - runs the CLI matrix against an isolated temporary data dir
 - prints `PASS/XFAIL/FAIL` summary
+
+High-value automated QA assertions include:
+- `mount attach` to same layer is a no-op for watcher signal and content.
+- `mount attach` switch updates watched content and path deltas (add/remove/rename).
+- parent-layer-chain attach switch updates effective content and should emit watcher signal.
+- detached -> attach switch updates content and should emit watcher signal.
+- destructive non-interactive commands require `--force`.
+- unknown `create` flags are rejected.
+- cross-entrypoint mount attach is rejected.
 
 Script location: `scripts/qa-cli-daemon.sh`.
 
