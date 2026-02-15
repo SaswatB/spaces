@@ -3,15 +3,28 @@ import { spawn } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { createInterface } from "node:readline/promises";
+import { stdin as input, stdout as output } from "node:process";
 import { api } from "../src/lib/api";
 
 type Entrypoint = Awaited<ReturnType<typeof api.entrypoints.list>>[number];
 type Layer = Awaited<ReturnType<typeof api.layers.list>>[number];
 type UserMount = Awaited<ReturnType<typeof api.userMounts.list>>[number];
-
-type CommandHandler = (args: string[]) => Promise<void>;
+type SystemStatus = Awaited<ReturnType<typeof api.system.status>>;
 
 type Category = "entrypoint" | "layer" | "mount" | "daemon";
+
+type GlobalOptions = {
+  json: boolean;
+  force: boolean;
+};
+
+type CommandContext = {
+  args: string[];
+  opts: GlobalOptions;
+};
+
+type CommandHandler = (ctx: CommandContext) => Promise<void>;
 
 type MatchBy = { id: string; name: string; path?: string; mountPath?: string };
 
@@ -31,6 +44,8 @@ const categoryAliases: Record<string, Category> = {
   d: "daemon",
 };
 
+const DAEMON_URL = process.env.SPACES_API_URL ?? "http://localhost:3100";
+
 function normalizePath(value: string): string {
   return path.resolve(value);
 }
@@ -38,35 +53,93 @@ function normalizePath(value: string): string {
 function isWithin(base: string, target: string): boolean {
   const basePath = normalizePath(base);
   const targetPath = normalizePath(target);
-  return (
-    targetPath === basePath || targetPath.startsWith(`${basePath}${path.sep}`)
-  );
+  return targetPath === basePath || targetPath.startsWith(`${basePath}${path.sep}`);
 }
 
-function selectByIdOrName<T extends MatchBy>(
-  items: T[],
-  ref: string
-): T | null {
+function selectByIdOrName<T extends MatchBy>(items: T[], ref: string): T | null {
   const idMatch = items.find((item) => item.id === ref);
-  if (idMatch) {
-    return idMatch;
-  }
+  if (idMatch) return idMatch;
+
   const nameMatches = items.filter((item) => item.name === ref);
   if (nameMatches.length > 1) {
-    throw new Error(`Multiple matches for name: ${ref}`);
+    throw new Error(`Multiple matches for name: ${ref}. Use an id to disambiguate.`);
   }
   return nameMatches[0] ?? null;
 }
 
-function selectByPath<T extends MatchBy>(
-  items: T[],
-  targetPath: string,
-  key: "path" | "mountPath"
-) {
+function selectByPath<T extends MatchBy>(items: T[], targetPath: string, key: "path" | "mountPath"): T | null {
   const matches = items
     .filter((item) => item[key] && isWithin(item[key] as string, targetPath))
     .sort((a, b) => (b[key] as string).length - (a[key] as string).length);
   return matches[0] ?? null;
+}
+
+function parseGlobalOptions(argv: string[]): { opts: GlobalOptions; args: string[] } {
+  const opts: GlobalOptions = { json: false, force: false };
+  const args: string[] = [];
+
+  for (const arg of argv) {
+    if (arg === "--json" || arg === "-j") {
+      opts.json = true;
+      continue;
+    }
+    if (arg === "--force" || arg === "-f") {
+      opts.force = true;
+      continue;
+    }
+    args.push(arg);
+  }
+
+  return { opts, args };
+}
+
+function parseFlags(args: string[]): { flags: Record<string, string | boolean>; positional: string[] } {
+  const flags: Record<string, string | boolean> = {};
+  const positional: string[] = [];
+
+  for (let i = 0; i < args.length; i += 1) {
+    const arg = args[i];
+    if (!arg) {
+      continue;
+    }
+    if (!arg.startsWith("--")) {
+      positional.push(arg);
+      continue;
+    }
+
+    const eqIndex = arg.indexOf("=");
+    if (eqIndex !== -1) {
+      const key = arg.slice(2, eqIndex);
+      flags[key] = arg.slice(eqIndex + 1);
+      continue;
+    }
+
+    const key = arg.slice(2);
+    const next = args[i + 1];
+    if (next && !next.startsWith("--")) {
+      flags[key] = next;
+      i += 1;
+    } else {
+      flags[key] = true;
+    }
+  }
+
+  return { flags, positional };
+}
+
+function getFlagString(flags: Record<string, string | boolean>, names: string[]): string | undefined {
+  for (const name of names) {
+    const value = flags[name];
+    if (typeof value === "string" && value.trim()) {
+      return value;
+    }
+  }
+  return undefined;
+}
+
+function hasUnknownFlags(flags: Record<string, string | boolean>, allowed: string[]): string[] {
+  const allowedSet = new Set(allowed);
+  return Object.keys(flags).filter((flag) => !allowedSet.has(flag));
 }
 
 function stateDir(): string {
@@ -76,8 +149,7 @@ function stateDir(): string {
   if (process.platform === "darwin") {
     return path.join(os.homedir(), "Library", "Application Support", "Spaces");
   }
-  const base =
-    process.env.XDG_STATE_HOME ?? path.join(os.homedir(), ".local", "state");
+  const base = process.env.XDG_STATE_HOME ?? path.join(os.homedir(), ".local", "state");
   return path.join(base, "spaces");
 }
 
@@ -126,6 +198,63 @@ function resolveDaemonPath(): string {
   return "spacesd";
 }
 
+function printTable(rows: Array<Record<string, string>>): void {
+  if (rows.length === 0) {
+    console.log("No results.");
+    return;
+  }
+
+  const first = rows[0];
+  if (!first) {
+    console.log("No results.");
+    return;
+  }
+  const headers = Object.keys(first);
+  const widths = headers.map((header) => {
+    const maxCell = rows.reduce((max, row) => Math.max(max, (row[header] ?? "").length), header.length);
+    return maxCell;
+  });
+
+  const fmt = (cells: string[]) => cells.map((cell, i) => cell.padEnd(widths[i] ?? 0)).join("  ");
+  console.log(fmt(headers));
+  console.log(fmt(widths.map((w) => "-".repeat(w))));
+  for (const row of rows) {
+    console.log(fmt(headers.map((h) => row[h] ?? "")));
+  }
+}
+
+function outputData<T>(ctx: CommandContext, data: T, human: (value: T) => void): void {
+  if (ctx.opts.json) {
+    console.log(JSON.stringify(data, null, 2));
+    return;
+  }
+  human(data);
+}
+
+async function confirmOrThrow(prompt: string, force: boolean): Promise<void> {
+  if (force) return;
+
+  if (!process.stdin.isTTY) {
+    throw new Error(`Refusing destructive action in non-interactive mode. Re-run with --force.`);
+  }
+
+  const rl = createInterface({ input, output });
+  try {
+    const answer = (await rl.question(`${prompt} [y/N] `)).trim().toLowerCase();
+    if (answer !== "y" && answer !== "yes") {
+      throw new Error("Cancelled.");
+    }
+  } finally {
+    rl.close();
+  }
+}
+
+function printStatus(status: SystemStatus): void {
+  console.log(`Entrypoints: ${status.entrypointCount}`);
+  console.log(`Layers: ${status.layerCount} (${status.mountedLayers} mounted)`);
+  console.log(`User mounts: ${status.userMountCount} (${status.mountedUserMounts} mounted)`);
+}
+
 async function stopDaemon(): Promise<{ stopped: boolean; message: string }> {
   const pid = readPid();
   if (!pid) {
@@ -169,39 +298,27 @@ async function resolveEntrypoint(ref?: string): Promise<Entrypoint | null> {
   const entrypoints = await api.entrypoints.list();
   if (ref) {
     const match = selectByIdOrName(entrypoints, ref);
-    if (match) {
-      return match;
-    }
+    if (match) return match;
     return selectByPath(entrypoints, ref, "path");
   }
   return selectByPath(entrypoints, process.cwd(), "path");
 }
 
-async function resolveLayer(
-  ref?: string,
-  entrypoint?: Entrypoint | null
-): Promise<Layer | null> {
+async function resolveLayer(ref?: string, entrypoint?: Entrypoint | null): Promise<Layer | null> {
   const layers = await api.layers.list(entrypoint?.id);
   if (ref) {
     const match = selectByIdOrName(layers, ref);
-    if (match) {
-      return match;
-    }
+    if (match) return match;
     return selectByPath(layers, ref, "mountPath");
   }
   return selectByPath(layers, process.cwd(), "mountPath");
 }
 
-async function resolveUserMount(
-  ref?: string,
-  entrypoint?: Entrypoint | null
-): Promise<UserMount | null> {
+async function resolveUserMount(ref?: string, entrypoint?: Entrypoint | null): Promise<UserMount | null> {
   const mounts = await api.userMounts.list(entrypoint?.id);
   if (ref) {
     const match = selectByIdOrName(mounts, ref);
-    if (match) {
-      return match;
-    }
+    if (match) return match;
     return selectByPath(mounts, ref, "mountPath");
   }
   return selectByPath(mounts, process.cwd(), "mountPath");
@@ -216,7 +333,7 @@ const daemonCommands: Record<string, CommandHandler> = {
     }
     console.log("Daemon not running.");
   },
-  start: async (args) => {
+  start: async ({ args }) => {
     const pid = readPid();
     if (pid && isRunning(pid)) {
       console.log(`Daemon already running (pid ${pid}).`);
@@ -225,6 +342,7 @@ const daemonCommands: Record<string, CommandHandler> = {
     if (pid && !isRunning(pid)) {
       fs.rmSync(pidFilePath(), { force: true });
     }
+
     ensureStateDir();
     const daemonPath = resolveDaemonPath();
     if (daemonPath.includes(path.sep) && !fs.existsSync(daemonPath)) {
@@ -248,109 +366,161 @@ const daemonCommands: Record<string, CommandHandler> = {
       if (child?.pid) {
         try {
           process.kill(child.pid, "SIGKILL");
-        } catch {}
+        } catch {
+          // ignore cleanup failures
+        }
       }
       fs.closeSync(logFd);
       throw error;
     }
+
     child.unref();
-    fs.writeFileSync(pidFilePath(), String(child.pid));
+    const startedPid = child.pid;
+    if (!startedPid) {
+      throw new Error("Daemon process started without a pid.");
+    }
+    fs.writeFileSync(pidFilePath(), String(startedPid));
     fs.closeSync(logFd);
-    console.log(`Started daemon (pid ${child.pid}).`);
+    console.log(`Started daemon (pid ${startedPid}).`);
     console.log(`Logs: ${logPath}`);
   },
   stop: async () => {
     const result = await stopDaemon();
     console.log(result.message);
   },
-  restart: async (args) => {
+  restart: async ({ args }) => {
     await stopDaemon();
-    await daemonCommands.start?.(args);
+    const startHandler = daemonCommands.start;
+    if (!startHandler) {
+      throw new Error("Daemon start command unavailable.");
+    }
+    await startHandler({ args, opts: { json: false, force: false } });
   },
 };
 
 const rootCommands: Record<string, CommandHandler> = {
-  status: async () => {
+  status: async (ctx) => {
     const status = await api.system.status();
-    console.log(JSON.stringify(status, null, 2));
+    outputData(ctx, status, printStatus);
   },
   remount: async () => {
     await api.system.remount();
-    console.log("OK");
+    console.log("Remounted all layer and user mounts.");
   },
 };
 
 const entrypointCommands: Record<string, CommandHandler> = {
-  list: async (args) => {
-    const [ref] = args;
+  list: async (ctx) => {
+    const [ref] = ctx.args;
     const entrypoint = await resolveEntrypoint(ref);
     if (ref && !entrypoint) {
       throw new Error(`Entrypoint not found: ${ref}`);
     }
-    const entrypoints = entrypoint
-      ? [entrypoint]
-      : await api.entrypoints.list();
-    console.log(JSON.stringify(entrypoints, null, 2));
+    const entrypoints = entrypoint ? [entrypoint] : await api.entrypoints.list();
+    outputData(ctx, entrypoints, (rows) => {
+      printTable(rows.map((it) => ({ id: it.id, name: it.name, path: it.path })));
+    });
   },
-  create: async (args) => {
-    const [pathArg, nameArg] = args;
-    const pathValue = pathArg ? pathArg : process.cwd();
-    const payload: { path: string; name?: string } = { path: pathValue };
-    if (nameArg && nameArg.trim()) {
-      payload.name = nameArg;
+  create: async (ctx) => {
+    const { flags, positional } = parseFlags(ctx.args);
+    const unknown = hasUnknownFlags(flags, ["path", "name"]);
+    if (unknown.length > 0) {
+      throw new Error(`Unknown option(s): ${unknown.map((u) => `--${u}`).join(", ")}`);
     }
+
+    const pathValue = getFlagString(flags, ["path"]) ?? positional[0] ?? process.cwd();
+    const nameValue = getFlagString(flags, ["name"]) ?? positional[1];
+
+    const payload: { path: string; name?: string } = { path: pathValue };
+    if (nameValue && nameValue.trim()) payload.name = nameValue;
+
     const entrypoint = await api.entrypoints.create(payload);
-    console.log(JSON.stringify(entrypoint, null, 2));
+    outputData(ctx, entrypoint, (value) => {
+      console.log(`Created entrypoint ${value.name} (${value.id})`);
+      console.log(`Path: ${value.path}`);
+    });
   },
-  delete: async (args) => {
-    const [ref] = args;
+  delete: async (ctx) => {
+    const [ref] = ctx.args;
     const entrypoint = await resolveEntrypoint(ref);
     if (!entrypoint) {
       throw new Error(`Entrypoint not found: ${ref ?? "(infer)"}`);
     }
+
+    await confirmOrThrow(
+      `Delete entrypoint '${entrypoint.name}' (${entrypoint.id})?`,
+      ctx.opts.force,
+    );
+
     await api.entrypoints.delete(entrypoint.id);
-    console.log("OK");
+    console.log(`Deleted entrypoint ${entrypoint.id}.`);
   },
 };
 
 const layerCommands: Record<string, CommandHandler> = {
-  list: async (args) => {
-    const [ref] = args;
+  list: async (ctx) => {
+    const [ref] = ctx.args;
     const entrypoint = await resolveEntrypoint(ref);
     if (ref && !entrypoint) {
       throw new Error(`Entrypoint not found: ${ref}`);
     }
     const layers = await api.layers.list(entrypoint?.id);
-    console.log(JSON.stringify(layers, null, 2));
+    outputData(ctx, layers, (rows) => {
+      printTable(
+        rows.map((it) => ({
+          id: it.id,
+          name: it.name,
+          entrypointId: it.entrypointId,
+          parentId: it.parentId ?? "-",
+          mounted: it.mountStatus,
+          mountPath: it.mountPath,
+        })),
+      );
+    });
   },
-  create: async (args) => {
-    const [first, second, third] = args;
-    const entrypoints = await api.entrypoints.list();
-    let entrypoint: Entrypoint | null = null;
-    let name: string | undefined;
-    let parentRef: string | undefined;
+  create: async (ctx) => {
+    const { flags, positional } = parseFlags(ctx.args);
+    const unknown = hasUnknownFlags(flags, ["entrypoint", "name", "parent"]);
+    if (unknown.length > 0) {
+      throw new Error(`Unknown option(s): ${unknown.map((u) => `--${u}`).join(", ")}`);
+    }
 
-    if (first) {
-      const candidate =
-        selectByIdOrName(entrypoints, first) ??
-        selectByPath(entrypoints, first, "path");
-      if (candidate) {
-        entrypoint = candidate;
-        name = second;
-        parentRef = third;
+    const explicitEntrypointRef = getFlagString(flags, ["entrypoint"]);
+    const explicitName = getFlagString(flags, ["name"]);
+    const explicitParentRef = getFlagString(flags, ["parent"]);
+
+    let entrypoint: Entrypoint | null = null;
+    let name: string | undefined = explicitName;
+    let parentRef: string | undefined = explicitParentRef;
+
+    if (explicitEntrypointRef) {
+      entrypoint = await resolveEntrypoint(explicitEntrypointRef);
+      if (!entrypoint) {
+        throw new Error(`Entrypoint not found: ${explicitEntrypointRef}`);
+      }
+      if (!name) name = positional[0];
+      if (!parentRef) parentRef = positional[1];
+    } else {
+      const [first, second, third] = positional;
+      const entrypoints = await api.entrypoints.list();
+      if (first) {
+        const candidate = selectByIdOrName(entrypoints, first) ?? selectByPath(entrypoints, first, "path");
+        if (candidate) {
+          entrypoint = candidate;
+          if (!name) name = second;
+          if (!parentRef) parentRef = third;
+        } else {
+          entrypoint = selectByPath(entrypoints, process.cwd(), "path");
+          if (!name) name = first;
+          if (!parentRef) parentRef = second;
+        }
       } else {
         entrypoint = selectByPath(entrypoints, process.cwd(), "path");
-        name = first;
-        parentRef = second;
       }
-    } else {
-      entrypoint = selectByPath(entrypoints, process.cwd(), "path");
     }
 
     if (!entrypoint) {
-      throw new Error(
-        "Unable to infer entrypoint for layer create. Provide an entrypoint ref."
-      );
+      throw new Error("Unable to infer entrypoint for layer create. Provide --entrypoint or run from an entrypoint path.");
     }
 
     let parentId: string | null = null;
@@ -362,82 +532,102 @@ const layerCommands: Record<string, CommandHandler> = {
       parentId = parent.id;
     }
 
-    const payload: {
-      entrypointId: string;
-      name?: string;
-      parentId?: string | null;
-    } = {
+    const payload: { entrypointId: string; name?: string; parentId?: string | null } = {
       entrypointId: entrypoint.id,
     };
-    if (name && name.trim()) {
-      payload.name = name;
-    }
-    if (parentId) {
-      payload.parentId = parentId;
-    }
+    if (name && name.trim()) payload.name = name;
+    if (parentId) payload.parentId = parentId;
 
     const layer = await api.layers.create(payload);
-    console.log(JSON.stringify(layer, null, 2));
+    outputData(ctx, layer, (value) => {
+      console.log(`Created layer ${value.name} (${value.id})`);
+      console.log(`Mount: ${value.mountPath}`);
+    });
   },
-  delete: async (args) => {
-    const [ref] = args;
+  delete: async (ctx) => {
+    const [ref] = ctx.args;
     const layer = await resolveLayer(ref, null);
     if (!layer) {
       throw new Error(`Layer not found: ${ref ?? "(infer)"}`);
     }
+
+    await confirmOrThrow(`Delete layer '${layer.name}' (${layer.id})?`, ctx.opts.force);
     await api.layers.delete(layer.id);
-    console.log("OK");
+    console.log(`Deleted layer ${layer.id}.`);
   },
-  mount: async (args) => {
+  mount: async ({ args }) => {
     const [ref] = args;
     const layer = await resolveLayer(ref, null);
     if (!layer) {
       throw new Error(`Layer not found: ${ref ?? "(infer)"}`);
     }
     await api.layers.mount(layer.id);
-    console.log("OK");
+    console.log(`Mounted layer ${layer.id}.`);
   },
-  unmount: async (args) => {
+  unmount: async ({ args }) => {
     const [ref] = args;
     const layer = await resolveLayer(ref, null);
     if (!layer) {
       throw new Error(`Layer not found: ${ref ?? "(infer)"}`);
     }
     await api.layers.unmount(layer.id);
-    console.log("OK");
+    console.log(`Unmounted layer ${layer.id}.`);
   },
-  diff: async (args) => {
-    const [ref] = args;
+  diff: async (ctx) => {
+    const [ref] = ctx.args;
     const layer = await resolveLayer(ref, null);
     if (!layer) {
       throw new Error(`Layer not found: ${ref ?? "(infer)"}`);
     }
     const diff = await api.layers.diff(layer.id);
-    console.log(JSON.stringify(diff, null, 2));
+    outputData(ctx, diff, (rows) => {
+      printTable(rows.map((it) => ({ type: it.changeType, path: it.path })));
+    });
   },
 };
 
 const mountCommands: Record<string, CommandHandler> = {
-  list: async (args) => {
-    const [ref] = args;
+  list: async (ctx) => {
+    const [ref] = ctx.args;
     const entrypoint = await resolveEntrypoint(ref);
     if (ref && !entrypoint) {
       throw new Error(`Entrypoint not found: ${ref}`);
     }
     const mounts = await api.userMounts.list(entrypoint?.id);
-    console.log(JSON.stringify(mounts, null, 2));
-  },
-  create: async (args) => {
-    const [name, mountPath, entryRef, layerRef] = args;
-    if (!name || !mountPath) {
-      throw new Error(
-        "Usage: mount create <name> <mountPath> [entrypoint] [layer]"
+    outputData(ctx, mounts, (rows) => {
+      printTable(
+        rows.map((it) => ({
+          id: it.id,
+          name: it.name,
+          entrypointId: it.entrypointId,
+          layerId: it.attachedLayerId ?? "-",
+          mounted: it.mountStatus,
+          mountPath: it.mountPath,
+        })),
       );
+    });
+  },
+  create: async (ctx) => {
+    const { flags, positional } = parseFlags(ctx.args);
+    const unknown = hasUnknownFlags(flags, ["name", "path", "mount-path", "entrypoint", "layer"]);
+    if (unknown.length > 0) {
+      throw new Error(`Unknown option(s): ${unknown.map((u) => `--${u}`).join(", ")}`);
     }
+
+    const name = getFlagString(flags, ["name"]) ?? positional[0];
+    const mountPath = getFlagString(flags, ["path", "mount-path"]) ?? positional[1];
+    const entryRef = getFlagString(flags, ["entrypoint"]) ?? positional[2];
+    const layerRef = getFlagString(flags, ["layer"]) ?? positional[3];
+
+    if (!name || !mountPath) {
+      throw new Error("Usage: mount create <name> <mountPath> [entrypoint] [layer] [--entrypoint <ref>] [--layer <ref>]");
+    }
+
     const entrypoint = await resolveEntrypoint(entryRef);
     if (!entrypoint) {
       throw new Error(`Entrypoint not found: ${entryRef ?? "(infer)"}`);
     }
+
     let attachedLayerId: string | null = null;
     if (layerRef) {
       const layer = await resolveLayer(layerRef, entrypoint);
@@ -446,47 +636,55 @@ const mountCommands: Record<string, CommandHandler> = {
       }
       attachedLayerId = layer.id;
     }
+
     const mount = await api.userMounts.create({
       name,
       entrypointId: entrypoint.id,
       mountPath,
       attachedLayerId,
     });
-    console.log(JSON.stringify(mount, null, 2));
+
+    outputData(ctx, mount, (value) => {
+      console.log(`Created mount ${value.name} (${value.id})`);
+      console.log(`Path: ${value.mountPath}`);
+    });
   },
-  delete: async (args) => {
-    const [ref] = args;
+  delete: async (ctx) => {
+    const [ref] = ctx.args;
     const mount = await resolveUserMount(ref, null);
     if (!mount) {
       throw new Error(`Mount not found: ${ref ?? "(infer)"}`);
     }
+
+    await confirmOrThrow(`Delete mount '${mount.name}' (${mount.id})?`, ctx.opts.force);
     await api.userMounts.delete(mount.id);
-    console.log("OK");
+    console.log(`Deleted mount ${mount.id}.`);
   },
-  mount: async (args) => {
+  mount: async ({ args }) => {
     const [ref] = args;
     const mount = await resolveUserMount(ref, null);
     if (!mount) {
       throw new Error(`Mount not found: ${ref ?? "(infer)"}`);
     }
     await api.userMounts.mount(mount.id);
-    console.log("OK");
+    console.log(`Mounted user mount ${mount.id}.`);
   },
-  unmount: async (args) => {
+  unmount: async ({ args }) => {
     const [ref] = args;
     const mount = await resolveUserMount(ref, null);
     if (!mount) {
       throw new Error(`Mount not found: ${ref ?? "(infer)"}`);
     }
     await api.userMounts.unmount(mount.id);
-    console.log("OK");
+    console.log(`Unmounted user mount ${mount.id}.`);
   },
-  attach: async (args) => {
+  attach: async ({ args }) => {
     const [mountRef, layerRef] = args;
     const mount = await resolveUserMount(mountRef, null);
     if (!mount) {
       throw new Error(`Mount not found: ${mountRef ?? "(infer)"}`);
     }
+
     let layerId: string | null = null;
     if (layerRef) {
       const entrypoint = await resolveEntrypoint(mount.entrypointId);
@@ -496,11 +694,13 @@ const mountCommands: Record<string, CommandHandler> = {
       }
       layerId = layer.id;
     }
-    await api.userMounts.attachLayer({
-      userMountId: mount.id,
-      layerId,
-    });
-    console.log("OK");
+
+    await api.userMounts.attachLayer({ userMountId: mount.id, layerId });
+    if (layerId) {
+      console.log(`Attached layer ${layerId} to mount ${mount.id}.`);
+    } else {
+      console.log(`Detached layer from mount ${mount.id}.`);
+    }
   },
 };
 
@@ -511,8 +711,109 @@ const categoryCommands: Record<Category, Record<string, CommandHandler>> = {
   daemon: daemonCommands,
 };
 
-async function main() {
-  const [first, second, ...rest] = process.argv.slice(2);
+function printHelp(): void {
+  console.log(`Spaces CLI
+
+Commands:
+  status
+  remount
+  entrypoint|ep|e <subcommand>
+  layer|l <subcommand>
+  mount|m <subcommand>
+  daemon|d <subcommand>
+
+Global options:
+  --json       Print structured JSON output
+  --force      Skip destructive-action confirmations
+
+Examples:
+  spaces status
+  spaces entrypoint create --path /repo/base --name base
+  spaces layer create --entrypoint ep_123 --name feat-login --parent lyr_123
+  spaces mount create dev ~/worktree --entrypoint ep_123 --layer lyr_456
+  spaces mount delete mnt_123 --force
+  spaces daemon start
+
+Run "spaces <category> help" to see subcommands.
+
+Environment:
+  SPACES_API_URL (default ${DAEMON_URL})
+  SPACES_AUTH_TOKEN (optional)
+  SPACES_DAEMON_PATH (optional)
+  SPACES_STATE_DIR (optional)
+`);
+}
+
+function printCategoryHelp(category: Category): void {
+  if (category === "entrypoint") {
+    console.log(`Entrypoint commands:
+  entrypoint list [entrypoint|path]
+  entrypoint create [path] [name] [--path <path>] [--name <name>]
+  entrypoint delete [entrypoint|path] [--force]`);
+    return;
+  }
+
+  if (category === "layer") {
+    console.log(`Layer commands:
+  layer list [entrypoint|path]
+  layer create [entrypoint|path] [name] [parent]
+      [--entrypoint <ref>] [--name <name>] [--parent <ref>]
+  layer delete [layer|path] [--force]
+  layer mount [layer|path]
+  layer unmount [layer|path]
+  layer diff [layer|path]`);
+    return;
+  }
+
+  if (category === "daemon") {
+    console.log(`Daemon commands:
+  daemon status
+  daemon start [args...]
+  daemon stop
+  daemon restart [args...]`);
+    return;
+  }
+
+  console.log(`Mount commands:
+  mount list [entrypoint|path]
+  mount create <name> <mountPath> [entrypoint|path] [layer]
+      [--name <name>] [--path <mountPath>] [--entrypoint <ref>] [--layer <ref>]
+  mount delete [mount|path] [--force]
+  mount mount [mount|path]
+  mount unmount [mount|path]
+  mount attach <mount|path> [layer]`);
+}
+
+function isConnectivityError(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  const msg = (error.message || "").toLowerCase();
+  if (msg.includes("fetch failed")) return true;
+  if (msg.includes("econnrefused")) return true;
+  if (msg.includes("network")) return true;
+  const cause = (error as { cause?: unknown }).cause;
+  if (cause && typeof cause === "object") {
+    const code = (cause as { code?: string }).code;
+    if (code === "ECONNREFUSED" || code === "ENOTFOUND" || code === "EHOSTUNREACH") {
+      return true;
+    }
+  }
+  return false;
+}
+
+function printFriendlyError(error: unknown): void {
+  if (isConnectivityError(error)) {
+    console.error(`Cannot reach spaces daemon at ${DAEMON_URL}.`);
+    console.error(`Try: spaces daemon start`);
+    console.error(`Or set SPACES_API_URL if your daemon is elsewhere.`);
+    return;
+  }
+  console.error(error instanceof Error ? error.message : String(error));
+}
+
+async function main(): Promise<void> {
+  const parsed = parseGlobalOptions(process.argv.slice(2));
+  const [first, second, ...rest] = parsed.args;
+
   if (!first || first === "help") {
     printHelp();
     return;
@@ -520,7 +821,7 @@ async function main() {
 
   const rootHandler = rootCommands[first];
   if (rootHandler) {
-    await rootHandler([second, ...rest].filter((arg) => arg !== undefined));
+    await rootHandler({ args: [second, ...rest].filter((arg): arg is string => arg !== undefined), opts: parsed.opts });
     return;
   }
 
@@ -539,40 +840,10 @@ async function main() {
     throw new Error(`Unknown subcommand: ${first} ${second}`);
   }
 
-  await handler(rest);
-}
-
-function printHelp() {
-  console.log(
-    `Spaces CLI\n\nCommands:\n  status\n  remount\n  entrypoint|ep|e <subcommand>\n  layer|l <subcommand>\n  mount|m <subcommand>\n  daemon|d <subcommand>\n\nRun \"spaces <category> help\" to see subcommands.\n\nEnvironment:\n  SPACES_API_URL (default http://localhost:3100)\n  SPACES_AUTH_TOKEN (optional)\n  SPACES_DAEMON_PATH (optional)\n  SPACES_STATE_DIR (optional)\n`
-  );
-}
-
-function printCategoryHelp(category: Category) {
-  if (category === "entrypoint") {
-    console.log(
-      `Entrypoint commands:\n  entrypoint list [entrypoint|path]\n  entrypoint create [path] [name]\n  entrypoint delete [entrypoint|path]`
-    );
-    return;
-  }
-  if (category === "layer") {
-    console.log(
-      `Layer commands:\n  layer list [entrypoint|path]\n  layer create [entrypoint|path] [name] [parent]\n  layer delete [layer|path]\n  layer mount [layer|path]\n  layer unmount [layer|path]\n  layer diff [layer|path]`
-    );
-    return;
-  }
-  if (category === "daemon") {
-    console.log(
-      `Daemon commands:\n  daemon status\n  daemon start [args...]\n  daemon stop\n  daemon restart [args...]`
-    );
-    return;
-  }
-  console.log(
-    `Mount commands:\n  mount list [entrypoint|path]\n  mount create <name> <mountPath> [entrypoint|path] [layer]\n  mount delete [mount|path]\n  mount mount [mount|path]\n  mount unmount [mount|path]\n  mount attach <mount|path> [layer]`
-  );
+  await handler({ args: rest, opts: parsed.opts });
 }
 
 main().catch((error) => {
-  console.error(error instanceof Error ? error.message : String(error));
+  printFriendlyError(error);
   process.exit(1);
 });
