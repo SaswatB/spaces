@@ -11,6 +11,9 @@
     "typecheck": "pnpm -r typecheck",
     "openapi:generate": "cp packages/daemon-jvm/src/main/resources/openapi.json packages/web/src/lib/openapi.json && pnpm --filter @spaces/web exec openapi-typescript ./src/lib/openapi.json --output ./src/lib/openapi-types.ts",
     "openapi:check": "sh ./scripts/check-openapi-sync.sh",
+    "release:artifacts": "sh ./scripts/build-release-artifacts.sh",
+    "install:release": "sh ./scripts/install.sh",
+    "uninstall:release": "sh ./scripts/uninstall.sh",
     "cli": "pnpm --filter @spaces/web cli"
   },
   "devDependencies": {
