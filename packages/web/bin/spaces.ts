@@ -3,7 +3,7 @@ import { spawn } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { api } from "../app/lib/api";
+import { api } from "../src/lib/api";
 
 type Entrypoint = Awaited<ReturnType<typeof api.entrypoints.list>>[number];
 type Layer = Awaited<ReturnType<typeof api.layers.list>>[number];

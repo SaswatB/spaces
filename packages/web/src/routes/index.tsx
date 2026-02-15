@@ -2,7 +2,6 @@ import { createFileRoute } from '@tanstack/react-router';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api } from '../lib/api';
 
-// @ts-expect-error - Route types are generated at build time
 export const Route = createFileRoute('/')({
   component: Dashboard,
 });

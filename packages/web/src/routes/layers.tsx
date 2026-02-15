@@ -3,7 +3,6 @@ import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, Entrypoint, Layer } from "../lib/api";
 
-// @ts-expect-error - Route types are generated at build time
 export const Route = createFileRoute("/layers")({
   component: LayersPage,
   validateSearch: (search: Record<string, unknown>) => ({
@@ -12,7 +11,6 @@ export const Route = createFileRoute("/layers")({
 });
 
 function LayersPage() {
-  // @ts-expect-error - Route types are generated at build time
   const { entrypointId } = useSearch({ from: "/layers" });
   const { data: layers, isLoading } = useQuery({
     queryKey: ["layers", "list", entrypointId],

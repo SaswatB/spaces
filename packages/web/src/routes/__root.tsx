@@ -1,9 +1,4 @@
-import {
-  Outlet,
-  ScrollRestoration,
-  createRootRoute,
-  HeadContent,
-} from '@tanstack/react-router';
+import { HeadContent, Scripts, ScrollRestoration, createRootRoute } from '@tanstack/react-router';
 import { useState } from 'react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 
@@ -21,22 +16,12 @@ export const Route = createRootRoute({
       },
     ],
   }),
-  component: RootComponent,
+  shellComponent: RootDocument,
 });
 
-function RootComponent() {
+function RootDocument({ children }: { children: React.ReactNode }) {
   const [queryClient] = useState(() => new QueryClient());
 
-  return (
-    <QueryClientProvider client={queryClient}>
-      <RootDocument>
-        <Outlet />
-      </RootDocument>
-    </QueryClientProvider>
-  );
-}
-
-function RootDocument({ children }: { children: React.ReactNode }) {
   return (
     <html lang="en">
       <head>
@@ -158,31 +143,34 @@ function RootDocument({ children }: { children: React.ReactNode }) {
         />
       </head>
       <body>
-        <main className="container">
-          <nav>
-            <ul>
-              <li>
-                <strong>Spaces</strong>
-              </li>
-            </ul>
-            <ul>
-              <li>
-                <a href="/">Dashboard</a>
-              </li>
-              <li>
-                <a href="/entrypoints">Entrypoints</a>
-              </li>
-              <li>
-                <a href="/layers">Layers</a>
-              </li>
-              <li>
-                <a href="/mounts">User Mounts</a>
-              </li>
-            </ul>
-          </nav>
-          {children}
-        </main>
+        <QueryClientProvider client={queryClient}>
+          <main className="container">
+            <nav>
+              <ul>
+                <li>
+                  <strong>Spaces</strong>
+                </li>
+              </ul>
+              <ul>
+                <li>
+                  <a href="/">Dashboard</a>
+                </li>
+                <li>
+                  <a href="/entrypoints">Entrypoints</a>
+                </li>
+                <li>
+                  <a href="/layers">Layers</a>
+                </li>
+                <li>
+                  <a href="/mounts">User Mounts</a>
+                </li>
+              </ul>
+            </nav>
+            {children}
+          </main>
+        </QueryClientProvider>
         <ScrollRestoration />
+        <Scripts />
       </body>
     </html>
   );
