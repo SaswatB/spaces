@@ -264,10 +264,5 @@ data class Config(
             return value.trim()
         }
 
-        private fun normalizeExportRoot(value: String): String {
-            val trimmed = value.trim()
-            val withSlash = if (trimmed.startsWith("/")) trimmed else "/$trimmed"
-            return withSlash.trimEnd('/')
-        }
     }
 }

@@ -5,7 +5,7 @@ Exposes a minimal HTTP API and includes an NFSv4 server wiring using dCache nfs4
 ## Running (dev)
 
 ```bash
-./gradlew run
+gradle -p packages/daemon-jvm run
 ```
 
 Environment variables:

@@ -1,6 +1,9 @@
 #!/usr/bin/env sh
 set -euo pipefail
 
+# Installs prebuilt release artifacts.
+# Local development builds are not consumed by this script.
+
 if [ "${SPACES_VERSION:-}" = "" ]; then
   echo "SPACES_VERSION is required (ex: 0.1.0)"
   exit 1
@@ -59,13 +62,20 @@ if [ ! -f "$TMP_DIR/spaces" ]; then
   exit 1
 fi
 
-if [ ! -f "$TMP_DIR/spacesd" ]; then
-  echo "spacesd binary not found in archive"
+DAEMON_PATH=""
+if [ -f "$TMP_DIR/spacesd" ]; then
+  DAEMON_PATH="$TMP_DIR/spacesd"
+elif [ -f "$TMP_DIR/spaces-daemon" ]; then
+  DAEMON_PATH="$TMP_DIR/spaces-daemon"
+fi
+
+if [ "$DAEMON_PATH" = "" ]; then
+  echo "spacesd or spaces-daemon binary not found in archive"
   exit 1
 fi
 
 install -m 0755 "$TMP_DIR/spaces" "$BIN_DIR/spaces"
-install -m 0755 "$TMP_DIR/spacesd" "$BIN_DIR/spacesd"
+install -m 0755 "$DAEMON_PATH" "$BIN_DIR/spacesd"
 
 echo "Installed spaces and spacesd to $BIN_DIR"
 echo "Make sure $BIN_DIR is on your PATH."
