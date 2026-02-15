@@ -5,8 +5,8 @@
     "lib": ["DOM", "DOM.Iterable", "ES2022"],
     "outDir": "./dist",
     "rootDir": ".",
-    "types": ["vinxi/types/client", "vinxi/types/server"]
+    "types": ["vite/client"],
+    "baseUrl": "."
   },
-  "include": ["app/**/*", "*.ts"],
-  "exclude": ["app/routeTree.gen.ts"]
+  "include": ["src/**/*", "bin/**/*", "vite.config.ts"]
 }

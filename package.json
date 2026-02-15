@@ -5,11 +5,11 @@
   "description": "OverlayFS management system with web UI",
   "scripts": {
     "dev": "pnpm --parallel -r dev",
-    "dev:daemon": "pnpm --filter @spaces/daemon dev",
+    "dev:daemon": "gradle -p packages/daemon-jvm run",
     "dev:web": "pnpm --filter @spaces/web dev",
     "build": "pnpm -r build",
     "typecheck": "pnpm -r typecheck",
-    "openapi:generate": "cargo run --manifest-path packages/daemon-rs/Cargo.toml --bin openapi > packages/web/app/lib/openapi.json && pnpm --filter @spaces/web exec openapi-typescript ./app/lib/openapi.json --output ./app/lib/openapi-types.ts",
+    "openapi:generate": "cp packages/daemon-jvm/src/main/resources/openapi.json packages/web/src/lib/openapi.json && pnpm --filter @spaces/web exec openapi-typescript ./src/lib/openapi.json --output ./src/lib/openapi-types.ts",
     "cli": "pnpm --filter @spaces/web cli"
   },
   "devDependencies": {
