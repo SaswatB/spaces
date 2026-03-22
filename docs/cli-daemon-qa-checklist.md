@@ -36,12 +36,15 @@ This script:
 - extracts bundled-runtime `spacesd`
 - runs the CLI matrix against an isolated temporary data dir
 - prints `PASS/XFAIL/FAIL` summary
+- exits nonzero when any hard `FAIL` occurs
 
 High-value automated QA assertions include:
 - `mount attach` to same layer is a no-op for watcher signal and content.
 - `mount attach` switch updates watched content and path deltas (add/remove/rename).
 - parent-layer-chain attach switch updates effective content and should emit watcher signal.
 - detached -> attach switch updates content and should emit watcher signal.
+- deleting an inherited parent-layer path through a child-layer mount keeps it hidden in both the layer view and attached user mount.
+- renaming an inherited parent-layer path through a child-layer mount hides the old path and surfaces the new path in both views.
 - destructive non-interactive commands require `--force`.
 - unknown `create` flags are rejected.
 - cross-entrypoint mount attach is rejected.
@@ -92,3 +95,4 @@ pnpm --filter @spaces/web exec tsx bin/spaces.ts daemon stop
 
 - If daemon start fails with Java class-version errors, ensure `SPACES_DAEMON_PATH` points to bundled `spacesd` artifact instead of Gradle’s `spaces-daemon` launcher.
 - If mounts fail with permission-related errors (`mount_nfs`, `umount`), classify as environment-limited (`XFAIL`) in local QA.
+- Set `SPACES_QA_BUILD_ARTIFACTS=0` to reuse an existing `release/` build while iterating on the QA script.

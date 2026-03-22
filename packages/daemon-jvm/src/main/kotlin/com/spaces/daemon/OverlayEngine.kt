@@ -28,8 +28,33 @@ data class ResolvedPath(val source: Path)
 
 class OverlayEngine {
     fun resolvePath(view: OverlayView, relative: String): ResolvedPath? {
-        val rel = Paths.get(relative)
-        for (layer in view.layers) {
+        return resolvePath(view, Paths.get(relative))
+    }
+
+    fun resolveLowerPath(view: OverlayView, relative: String): ResolvedPath? {
+        return resolveLowerPath(view, Paths.get(relative))
+    }
+
+    fun exists(view: OverlayView, relative: String): Boolean = resolvePath(view, relative) != null
+
+    fun existsInLower(view: OverlayView, relative: String): Boolean =
+            resolveLowerPath(view, relative) != null
+
+    fun resolvePath(view: OverlayView, relative: Path): ResolvedPath? {
+        return resolveAgainstLayers(view.layers, view.entrypoint, relative)
+    }
+
+    fun resolveLowerPath(view: OverlayView, relative: Path): ResolvedPath? {
+        return resolveAgainstLayers(view.layers.drop(1), view.entrypoint, relative)
+    }
+
+    private fun resolveAgainstLayers(
+            layers: List<Path>,
+            entrypoint: Path,
+            relative: Path
+    ): ResolvedPath? {
+        val rel = relative
+        for (layer in layers) {
             val candidate = layer.resolve(rel)
             if (candidate.exists()) {
                 return ResolvedPath(candidate)
@@ -38,7 +63,7 @@ class OverlayEngine {
                 return null
             }
         }
-        val lower = view.entrypoint.resolve(rel)
+        val lower = entrypoint.resolve(rel)
         return if (lower.exists()) ResolvedPath(lower) else null
     }
 
@@ -102,13 +127,12 @@ class OverlayEngine {
         val upperPath = topUpper.resolve(rel)
         if (upperPath.exists()) return
 
-        val lowerPath = lowerSourcePath(view, rel) ?: return
+        val lowerPath = resolveLowerPath(view, rel)?.source ?: return
 
         if (lowerPath.isDirectory()) {
             ensureParentDirs(view, rel)
             Files.createDirectories(upperPath)
             applyMetadata(upperPath, lowerPath)
-            markOpaque(view, rel.toString())
         } else {
             ensureParentDirs(view, rel)
             Files.copy(lowerPath, upperPath)
@@ -126,7 +150,7 @@ class OverlayEngine {
             current = current.resolve(component)
             val upperDir = topUpper.resolve(current)
             if (upperDir.exists()) return@forEach
-            val metaSource = lowerSourcePath(view, current)
+            val metaSource = resolveLowerPath(view, current)?.source
             Files.createDirectories(upperDir)
             if (metaSource != null && metaSource.isDirectory()) {
                 applyMetadata(upperDir, metaSource)
@@ -135,7 +159,7 @@ class OverlayEngine {
     }
 
     fun applyLowerMetadata(view: OverlayView, relative: Path, target: Path) {
-        val source = lowerSourcePath(view, relative) ?: return
+        val source = resolveLowerPath(view, relative)?.source ?: return
         applyMetadata(target, source)
     }
 
@@ -183,19 +207,10 @@ class OverlayEngine {
     }
 
     private fun isWhiteoutedInLayer(layer: Path, relative: Path): Boolean {
-        val parent = relative.parent ?: return false
+        val parent = relative.parent ?: Paths.get("")
         val name = relative.fileName?.toString() ?: return false
         val marker = layer.resolve(parent).resolve(markerName(name))
         return marker.exists()
-    }
-
-    private fun lowerSourcePath(view: OverlayView, relative: Path): Path? {
-        view.layers.drop(1).forEach { layer ->
-            val candidate = layer.resolve(relative)
-            if (candidate.exists()) return candidate
-        }
-        val entry = view.entrypoint.resolve(relative)
-        return if (entry.exists()) entry else null
     }
 
     private fun applyMetadata(target: Path, source: Path) {

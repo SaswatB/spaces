@@ -12,8 +12,8 @@ import java.nio.file.attribute.PosixFilePermission
 import java.nio.file.attribute.PosixFilePermissions
 import java.security.MessageDigest
 import java.time.Instant
-import java.util.Base64
 import java.util.UUID
+import java.util.Base64
 import java.util.concurrent.ConcurrentHashMap
 import javax.security.auth.Subject
 import kotlin.io.path.exists
@@ -67,6 +67,9 @@ class SpacesVfs(private val db: SpacesDatabase) : VirtualFileSystem {
         val mount = resolved.mountView ?: throw NotDirException()
         ensureWritable(mount)
         val relative = resolveChildRelative(resolved, name)
+        if (overlay.exists(mount.view, relative)) {
+            throw ExistException()
+        }
         val topUpper = mount.view.layers.firstOrNull() ?: throw PermException()
         overlay.ensureParentDirs(mount.view, Paths.get(relative))
         val target = topUpper.resolve(relative)
@@ -141,6 +144,9 @@ class SpacesVfs(private val db: SpacesDatabase) : VirtualFileSystem {
 
         val sourceRel = sourceResolved.relativePath
         val targetRel = resolveChildRelative(parentResolved, name)
+        if (overlay.exists(mount.view, targetRel)) {
+            throw ExistException()
+        }
         val topUpper = mount.view.layers.firstOrNull() ?: throw PermException()
         overlay.copyUpIfNeeded(mount.view, sourceRel)
         overlay.ensureParentDirs(mount.view, Paths.get(targetRel))
@@ -182,6 +188,9 @@ class SpacesVfs(private val db: SpacesDatabase) : VirtualFileSystem {
             }
             return NfsDirectoryStream(verifier, dirEntries)
         } catch (error: Exception) {
+            if (error is NoEntException) {
+                throw error
+            }
             logger.warn(
                     "VFS list failed path={} kind={} rel={} mountId={}",
                     resolved.path,
@@ -208,17 +217,17 @@ class SpacesVfs(private val db: SpacesDatabase) : VirtualFileSystem {
                     val candidates = ArrayList<String>()
                     val roots = mount.view.layers + mount.view.entrypoint
                     for (root in roots) {
-                        val dir = root.resolve(rel)
-                        if (!Files.exists(dir, LinkOption.NOFOLLOW_LINKS)) continue
+                        val dirPath = root.resolve(rel)
+                        if (!Files.exists(dirPath, LinkOption.NOFOLLOW_LINKS)) continue
                         val attrs =
                                 Files.readAttributes(
-                                        dir,
+                                        dirPath,
                                         BasicFileAttributes::class.java,
                                         LinkOption.NOFOLLOW_LINKS
                                 )
-                        val key = stableKeyForPath(dir, followLinks = false)
+                        val key = stableKeyForPath(dirPath, followLinks = false)
                         candidates.add(
-                                "dir:${key ?: dir}:${attrs.lastModifiedTime().toMillis()}:${attrs.size()}"
+                                "dir:${key ?: dirPath}:${attrs.lastModifiedTime().toMillis()}:${attrs.size()}"
                         )
                     }
                     if (candidates.isEmpty()) NfsDirectoryStream.ZERO_VERIFIER
@@ -236,13 +245,15 @@ class SpacesVfs(private val db: SpacesDatabase) : VirtualFileSystem {
         val mount = resolved.mountView ?: throw NotDirException()
         ensureWritable(mount)
         val relative = resolveChildRelative(resolved, name)
+        if (overlay.exists(mount.view, relative)) {
+            throw ExistException()
+        }
         val topUpper = mount.view.layers.firstOrNull() ?: throw PermException()
         overlay.ensureParentDirs(mount.view, Paths.get(relative))
         val target = topUpper.resolve(relative)
-        Files.createDirectories(target)
+        Files.createDirectory(target)
         applyMode(target, mode)
         overlay.applyEntrypointOwner(mount.view, target)
-        overlay.markOpaque(mount.view, relative)
         emitOp(mount, relative, NfsOpKind.Mkdir)
         return inodeForResolvedPath(resolved.mountPath, relative, target)
     }
@@ -258,6 +269,7 @@ class SpacesVfs(private val db: SpacesDatabase) : VirtualFileSystem {
         val fromRel = resolveChildRelative(fromResolved, oldName)
         val toRel = resolveChildRelative(toResolved, newName)
         val topUpper = mount.view.layers.firstOrNull() ?: throw PermException()
+        val sourceHadLower = overlay.existsInLower(mount.view, fromRel)
         overlay.copyUpIfNeeded(mount.view, fromRel)
         overlay.ensureParentDirs(mount.view, Paths.get(toRel))
         val source = topUpper.resolve(fromRel)
@@ -266,6 +278,9 @@ class SpacesVfs(private val db: SpacesDatabase) : VirtualFileSystem {
         logOpStart("MOVE", "${source} -> ${target}")
         Files.move(source, target, StandardCopyOption.REPLACE_EXISTING)
         logOpEnd("MOVE", "${source} -> ${target}", start)
+        if (sourceHadLower) {
+            overlay.markWhiteout(mount.view, fromRel)
+        }
         updateHandlePathsForMove(fromResolved.mountPath, fromRel, toRel)
         emitOp(mount, fromRel, NfsOpKind.Rename, toRel)
         return true
@@ -335,6 +350,7 @@ class SpacesVfs(private val db: SpacesDatabase) : VirtualFileSystem {
         val rel = resolveChildRelative(resolved, name)
         val topUpper = mount.view.layers.firstOrNull() ?: throw PermException()
         val upperPath = topUpper.resolve(rel)
+        val lowerExists = overlay.existsInLower(mount.view, rel)
         if (upperPath.exists()) {
             val start = System.nanoTime()
             logOpStart("REMOVE", upperPath.toString())
@@ -345,11 +361,13 @@ class SpacesVfs(private val db: SpacesDatabase) : VirtualFileSystem {
             } finally {
                 logOpEnd("REMOVE", upperPath.toString(), start)
             }
+            if (lowerExists) {
+                overlay.markWhiteout(mount.view, rel)
+            }
             emitOp(mount, rel, NfsOpKind.Remove)
             return
         }
-        val lower = mount.view.entrypoint.resolve(rel)
-        if (lower.exists()) {
+        if (lowerExists) {
             overlay.markWhiteout(mount.view, rel)
             emitOp(mount, rel, NfsOpKind.Remove)
             return
@@ -368,6 +386,9 @@ class SpacesVfs(private val db: SpacesDatabase) : VirtualFileSystem {
         val mount = resolved.mountView ?: throw NotDirException()
         ensureWritable(mount)
         val rel = resolveChildRelative(resolved, linkName)
+        if (overlay.exists(mount.view, rel)) {
+            throw ExistException()
+        }
         val topUpper = mount.view.layers.firstOrNull() ?: throw PermException()
         overlay.ensureParentDirs(mount.view, Paths.get(rel))
         val linkPath = topUpper.resolve(rel)
@@ -517,6 +538,9 @@ class SpacesVfs(private val db: SpacesDatabase) : VirtualFileSystem {
                 else -> dirStat(resolved.path)
             }
         } catch (error: Exception) {
+            if (error is NoEntException) {
+                throw error
+            }
             logger.warn(
                     "VFS getattr failed path={} kind={} rel={} mountId={}",
                     resolved.path,
@@ -963,21 +987,12 @@ class SpacesVfs(private val db: SpacesDatabase) : VirtualFileSystem {
         }
 
         if (changed.isNotEmpty()) {
-            val now = FileTime.from(Instant.now())
-            for (relative in changed.sorted()) {
-                val target = mountRoot.resolve(relative)
-                if (Files.exists(target)) {
-                    runCatching { Files.setLastModifiedTime(target, now) }
-                }
-                val parent = target.parent
-                if (parent != null && Files.exists(parent)) {
-                    runCatching { Files.setLastModifiedTime(parent, now) }
-                }
-            }
+            // Avoid touching real files through NFS here: setattr can copy-up and pin old content
+            // into the user-mount upper, which breaks attach semantics. Emit a transient pulse
+            // event at mount root to wake recursive watchers without mutating user content.
+            emitSwitchPulseEvent(mountRoot)
         }
 
-        // Keep a deterministic mount-visible rename/touch event for watchers.
-        emitSwitchMarkerEvent(mountRoot)
     }
 
     private fun dirtyFingerprintsForLayer(layerId: String?): Map<String, String> {
@@ -995,11 +1010,15 @@ class SpacesVfs(private val db: SpacesDatabase) : VirtualFileSystem {
     private fun dirtyPathsForLayer(layerId: String): Set<String> {
         val layer = db.getLayer(layerId) ?: return emptySet()
         val entrypoint = db.getEntrypoint(layer.entrypointId) ?: return emptySet()
-        val upperRoot = Paths.get(layer.upperDir)
         val entryRoot = Paths.get(entrypoint.path)
         val entries = mutableSetOf<String>()
-        if (Files.exists(upperRoot)) {
-            collectDirtyPaths(upperRoot, upperRoot, entryRoot, entries)
+        var current: LayerRecord? = layer
+        while (current != null) {
+            val upperRoot = Paths.get(current.upperDir)
+            if (Files.exists(upperRoot)) {
+                collectDirtyPaths(upperRoot, upperRoot, entryRoot, entries)
+            }
+            current = current.parentId?.let { db.getLayer(it) }
         }
         return entries
     }
@@ -1015,6 +1034,7 @@ class SpacesVfs(private val db: SpacesDatabase) : VirtualFileSystem {
                 val rel = upperRoot.relativize(entry)
                 val name = entry.fileName.toString()
                 if (name == OPAQUE_MARKER) continue
+                if (isIgnoredInvalidationName(name)) continue
                 val whiteout = isWhiteoutMarker(name)
                 if (whiteout != null) {
                     val deletePath = rel.parent?.resolve(whiteout) ?: Paths.get(whiteout)
@@ -1052,33 +1072,6 @@ class SpacesVfs(private val db: SpacesDatabase) : VirtualFileSystem {
         }
     }
 
-    private fun emitSwitchMarkerEvent(mountRoot: Path) {
-        if (!Files.exists(mountRoot)) return
-        val now = FileTime.from(Instant.now())
-        val marker = mountRoot.resolve(".spaces-hot-reload")
-        val temp = mountRoot.resolve(".spaces-hot-reload.${UUID.randomUUID()}")
-        runCatching {
-            Files.writeString(
-                    temp,
-                    now.toMillis().toString(),
-                    StandardOpenOption.CREATE,
-                    StandardOpenOption.TRUNCATE_EXISTING,
-                    StandardOpenOption.WRITE
-            )
-            Files.move(temp, marker, StandardCopyOption.REPLACE_EXISTING)
-            Files.setLastModifiedTime(marker, now)
-            Files.setLastModifiedTime(mountRoot, now)
-        }
-                .onFailure {
-                    runCatching {
-                        if (!Files.exists(marker)) {
-                            Files.createFile(marker)
-                        }
-                        Files.setLastModifiedTime(marker, now)
-                    }
-                }
-    }
-
     private fun sha256File(path: Path): String {
         val digest = MessageDigest.getInstance("SHA-256")
         Files.newInputStream(path).use { stream ->
@@ -1097,6 +1090,31 @@ class SpacesVfs(private val db: SpacesDatabase) : VirtualFileSystem {
         return digest.joinToString("") { "%02x".format(it) }
     }
 
+    private fun emitSwitchPulseEvent(mountRoot: Path) {
+        if (!Files.exists(mountRoot)) return
+        val pulse = mountRoot.resolve(".spaces-reload-pulse.${UUID.randomUUID()}")
+        runCatching {
+                    Files.writeString(
+                            pulse,
+                            Instant.now().toEpochMilli().toString(),
+                            StandardOpenOption.CREATE_NEW,
+                            StandardOpenOption.WRITE
+                    )
+                    Files.deleteIfExists(pulse)
+                }
+                .onFailure { error ->
+                    logger.debug("Failed to emit layer-switch pulse event at {}", mountRoot, error)
+                }
+    }
+
+    private fun isIgnoredInvalidationName(name: String): Boolean {
+        if (name.startsWith("._")) return true
+        if (name.startsWith(".nfs")) return true
+        if (name.startsWith(".spaces-reload-pulse.")) return true
+        if (name == ".DS_Store") return true
+        return false
+    }
+
     // endregion
 
     // region: Replay
@@ -1105,9 +1123,19 @@ class SpacesVfs(private val db: SpacesDatabase) : VirtualFileSystem {
         // Source is resolved through the in-process overlay model so replay reads never traverse
         // exported NFS mount paths (avoids self-reentrant NFS reads during replication).
         val sourceMount = buildMountViewById(sourceMountId) ?: return
+        // A user mount can observe files from its attached layer as lower content.
+        // Replaying such observed lower paths back into that same attached layer is an echo that
+        // creates replay loops and noisy failures (same-file/same-target copies).
+        if (shouldSkipReplayEchoToAttachedLayer(sourceMountId, targetMountId, sourceMount, op)) {
+            return
+        }
         // Target writes intentionally go through the target mount path to surface real filesystem
         // change notifications for external watchers (dev servers, hot-reload tooling).
         val targetRoot = mountPathForId(targetMountId) ?: return
+        if (shouldPulseInsteadOfReplay(sourceMountId, targetMountId, op)) {
+            emitSwitchPulseEvent(Paths.get(targetRoot))
+            return
+        }
 
         when (op.kind) {
             NfsOpKind.Remove, NfsOpKind.Rmdir ->
@@ -1126,6 +1154,45 @@ class SpacesVfs(private val db: SpacesDatabase) : VirtualFileSystem {
             NfsOpKind.Create, NfsOpKind.Write, NfsOpKind.Mkdir, NfsOpKind.Setattr ->
                     replayUpsert(sourceMount, Paths.get(targetRoot), op.relativePath)
         }
+    }
+
+    private fun shouldSkipReplayEchoToAttachedLayer(
+            sourceMountId: String,
+            targetMountId: String,
+            sourceMount: MountView,
+            op: NfsOp
+    ): Boolean {
+        val sourceUserMount = db.getUserMount(sourceMountId) ?: return false
+        if (sourceUserMount.attachedLayerId != targetMountId) return false
+        val targetLayer = db.getLayer(targetMountId) ?: return false
+        val sourcePath =
+                overlay.resolvePath(sourceMount.view, op.relativePath)?.source ?: return false
+        val targetUpper = Paths.get(targetLayer.upperDir).normalize()
+        return sourcePath.normalize().startsWith(targetUpper)
+    }
+
+    private fun shouldPulseInsteadOfReplay(
+            sourceMountId: String,
+            targetMountId: String,
+            op: NfsOp
+    ): Boolean {
+        if (op.kind != NfsOpKind.Remove &&
+                        op.kind != NfsOpKind.Rmdir &&
+                        op.kind != NfsOpKind.Rename
+        ) {
+            return false
+        }
+        val targetUserMount = db.getUserMount(targetMountId) ?: return false
+        val sourceLayerId = underlyingLayerId(sourceMountId) ?: return false
+        return targetUserMount.attachedLayerId == sourceLayerId
+    }
+
+    private fun underlyingLayerId(mountId: String): String? {
+        val userMount = db.getUserMount(mountId)
+        if (userMount != null) {
+            return userMount.attachedLayerId
+        }
+        return if (db.getLayer(mountId) != null) mountId else null
     }
 
     private fun buildMountViewById(mountId: String): MountView? {
@@ -1147,7 +1214,7 @@ class SpacesVfs(private val db: SpacesDatabase) : VirtualFileSystem {
             replayDirectoryView(sourceMount, targetRoot, relative)
             return
         }
-        copyFile(source, target)
+        syncLeaf(source, target)
     }
 
     private fun replayDelete(targetRoot: Path, relative: String) {
@@ -1187,9 +1254,26 @@ class SpacesVfs(private val db: SpacesDatabase) : VirtualFileSystem {
         // Enumerate the directory through overlay view semantics, not a single concrete dir.
         // This preserves parent/lower visibility when the top upper is only a partial delta.
         val targetDir = targetRoot.resolve(relative)
+        if (Files.exists(targetDir) && !Files.isDirectory(targetDir)) {
+            deletePath(targetDir)
+        }
         Files.createDirectories(targetDir)
-        val entries = overlay.listDir(sourceMount.view, relative)
-        for (name in entries) {
+        val visibleEntries =
+                overlay.listDir(sourceMount.view, relative).filterNot(::isIgnoredInvalidationName)
+        val visibleNames = visibleEntries.toSet()
+        if (Files.exists(targetDir)) {
+            Files.newDirectoryStream(targetDir).use { stream ->
+                for (entry in stream) {
+                    val name = entry.fileName.toString()
+                    if (isIgnoredInvalidationName(name)) continue
+                    if (!visibleNames.contains(name)) {
+                        deletePath(entry)
+                    }
+                }
+            }
+        }
+        for (name in visibleEntries) {
+            if (isIgnoredInvalidationName(name)) continue
             val childRelative = if (relative.isBlank()) name else "$relative/$name"
             val childSource =
                     overlay.resolvePath(sourceMount.view, childRelative)?.source ?: continue
@@ -1197,9 +1281,21 @@ class SpacesVfs(private val db: SpacesDatabase) : VirtualFileSystem {
             if (Files.isDirectory(childSource)) {
                 replayDirectoryView(sourceMount, targetRoot, childRelative)
             } else {
-                copyFile(childSource, childTarget)
+                syncLeaf(childSource, childTarget)
             }
         }
+    }
+
+    private fun syncLeaf(source: Path, target: Path) {
+        if (!Files.exists(source) || Files.isDirectory(source)) return
+        if (Files.exists(target) && Files.isDirectory(target)) {
+            deletePath(target)
+        }
+        if (Files.isSymbolicLink(source)) {
+            copySymlink(source, target)
+            return
+        }
+        copyFile(source, target)
     }
 
     private fun copyFile(source: Path, target: Path) {
@@ -1216,9 +1312,21 @@ class SpacesVfs(private val db: SpacesDatabase) : VirtualFileSystem {
         )
     }
 
+    private fun copySymlink(source: Path, target: Path) {
+        val parent = target.parent
+        if (parent != null) {
+            Files.createDirectories(parent)
+        }
+        val linkTarget = Files.readSymbolicLink(source)
+        if (Files.exists(target) || Files.isSymbolicLink(target)) {
+            deletePath(target)
+        }
+        Files.createSymbolicLink(target, linkTarget)
+    }
+
     private fun deletePath(target: Path) {
-        if (!Files.exists(target)) return
-        if (Files.isDirectory(target)) {
+        if (!Files.exists(target) && !Files.isSymbolicLink(target)) return
+        if (Files.isDirectory(target) && !Files.isSymbolicLink(target)) {
             target.toFile().deleteRecursively()
         } else {
             Files.deleteIfExists(target)

@@ -4,6 +4,7 @@ import java.time.Duration
 import java.time.Instant
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
+import org.slf4j.LoggerFactory
 
 data class NfsOp(
         val mountId: String,
@@ -47,9 +48,14 @@ class ReplicationService(
         private val engine: ReplicationEngine,
         private val vfs: SpacesVfs
 ) {
+    private val logger = LoggerFactory.getLogger(ReplicationService::class.java)
     private val replayDispatch = Executors.newSingleThreadExecutor()
+    private val invalidationDispatch = Executors.newSingleThreadExecutor()
 
     fun handleOp(op: NfsOp) {
+        if (isReplicationIgnoredOp(op)) {
+            return
+        }
         val layerId = resolveLayerId(op.mountId) ?: return
         val suppressionKey = suppressionKey(op)
         if (engine.isSuppressed(suppressionKey)) {
@@ -63,12 +69,36 @@ class ReplicationService(
             // Dispatch replay off the serving NFS thread.
             // Replay can touch mount paths to generate watcher-visible fs events, and we do not
             // want that I/O to synchronously re-enter NFS handling for the current request.
-            replayDispatch.execute { runCatching { vfs.replay(op.mountId, targetMountId, op) } }
+            replayDispatch.execute {
+                runCatching { vfs.replay(op.mountId, targetMountId, op) }
+                        .onFailure { error ->
+                            logger.warn(
+                                    "Replay failed sourceMountId={} targetMountId={} opKind={} path={} targetPath={}",
+                                    op.mountId,
+                                    targetMountId,
+                                    op.kind,
+                                    op.relativePath,
+                                    op.targetRelativePath,
+                                    error
+                            )
+                        }
+            }
         }
     }
 
     fun handleLayerSwitchInvalidation(mountPath: String, oldLayerId: String?, newLayerId: String?) {
-        vfs.invalidateMountForLayerSwitch(mountPath, oldLayerId, newLayerId)
+        invalidationDispatch.execute {
+            runCatching { vfs.invalidateMountForLayerSwitch(mountPath, oldLayerId, newLayerId) }
+                    .onFailure { error ->
+                        logger.warn(
+                                "Layer-switch invalidation failed mountPath={} oldLayerId={} newLayerId={}",
+                                mountPath,
+                                oldLayerId,
+                                newLayerId,
+                                error
+                        )
+                    }
+        }
     }
 
     private fun resolveLayerId(mountId: String): String? {
@@ -96,5 +126,21 @@ class ReplicationService(
         val renameSuffix =
                 if (op.kind == NfsOpKind.Rename) ":${op.targetRelativePath.orEmpty()}" else ""
         return "${op.mountId}:${op.relativePath}:${op.kind}$renameSuffix"
+    }
+
+    private fun isReplicationIgnoredOp(op: NfsOp): Boolean {
+        if (isIgnoredReplicationPath(op.relativePath)) return true
+        val target = op.targetRelativePath
+        return target != null && isIgnoredReplicationPath(target)
+    }
+
+    private fun isIgnoredReplicationPath(path: String): Boolean {
+        val parts = path.split('/')
+        return parts.any { part ->
+            part.startsWith("._") ||
+                    part.startsWith(".nfs") ||
+                    part.startsWith(".spaces-reload-pulse.") ||
+                    part == ".DS_Store"
+        }
     }
 }

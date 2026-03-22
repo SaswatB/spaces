@@ -12,6 +12,8 @@ class SpacesService(
         private val mountManager: MountManager,
         private val replication: ReplicationService
 ) {
+    private val overlay = OverlayEngine()
+
     fun listEntrypoints(): List<Entrypoint> = db.listEntrypoints().map { it.toEntrypoint() }
 
     fun getEntrypoint(id: String): Entrypoint? = db.getEntrypoint(id)?.toEntrypoint()
@@ -265,10 +267,10 @@ class SpacesService(
                 db.getEntrypoint(layer.entrypointId)
                         ?: throw IllegalArgumentException("Entrypoint not found")
         val upperRoot = Paths.get(layer.upperDir)
-        val entryRoot = Paths.get(entrypoint.path)
+        val lowerView = buildLowerViewForLayer(layer, entrypoint)
         val entries = mutableListOf<LayerDiffEntry>()
         if (Files.exists(upperRoot)) {
-            collectLayerDiff(upperRoot, upperRoot, entryRoot, entries)
+            collectLayerDiff(upperRoot, upperRoot, lowerView, entries)
         }
         return entries.sortedBy { it.path }
     }
@@ -392,7 +394,7 @@ class SpacesService(
     private fun collectLayerDiff(
             upperRoot: Path,
             current: Path,
-            entryRoot: Path,
+            lowerView: OverlayView,
             entries: MutableList<LayerDiffEntry>
     ) {
         Files.newDirectoryStream(current).use { stream ->
@@ -408,15 +410,22 @@ class SpacesService(
                     entries.add(LayerDiffEntry(deletePath.toString(), LayerDiffType.Delete))
                     continue
                 }
-                val entrypointPath = entryRoot.resolve(rel)
-                val changeType =
-                        if (Files.exists(entrypointPath)) LayerDiffType.Modify
-                        else LayerDiffType.Add
+                val changeType = if (overlay.exists(lowerView, rel.toString())) LayerDiffType.Modify else LayerDiffType.Add
                 entries.add(LayerDiffEntry(rel.toString(), changeType))
                 if (Files.isDirectory(entry)) {
-                    collectLayerDiff(upperRoot, entry, entryRoot, entries)
+                    collectLayerDiff(upperRoot, entry, lowerView, entries)
                 }
             }
         }
+    }
+
+    private fun buildLowerViewForLayer(layer: LayerRecord, entrypoint: EntrypointRecord): OverlayView {
+        val lowerLayers = mutableListOf<Path>()
+        var current = layer.parentId?.let { db.getLayer(it) }
+        while (current != null) {
+            lowerLayers.add(Paths.get(current.upperDir))
+            current = current.parentId?.let { db.getLayer(it) }
+        }
+        return OverlayView(Paths.get(entrypoint.path), lowerLayers)
     }
 }
