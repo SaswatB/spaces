@@ -10,6 +10,7 @@ It covers:
 - entrypoint/layer/mount CRUD flows
 - alias/flag behavior (`e`, `--mount-path`, `--force`, `--json`)
 - watcher-sensitive layer attach flows (switch, detach/reattach, no-op attach)
+- fixed-path dev-server workflows where a user mount stays stable while the attached layer changes
 - layer-switch delta semantics (add/remove/rename + nested subtree content)
 - CLI validation failures (unknown flags, cross-entrypoint attach, non-interactive delete without `--force`)
 
@@ -41,6 +42,7 @@ This script:
 High-value automated QA assertions include:
 - `mount attach` to same layer is a no-op for watcher signal and content.
 - `mount attach` switch updates watched content and path deltas (add/remove/rename).
+- a Vite dev server rooted at a fixed user mount path keeps serving from that path after a layer swap and returns the updated module content.
 - parent-layer-chain attach switch updates effective content and should emit watcher signal.
 - detached -> attach switch updates content and should emit watcher signal.
 - deleting an inherited parent-layer path through a child-layer mount keeps it hidden in both the layer view and attached user mount.
@@ -50,6 +52,24 @@ High-value automated QA assertions include:
 - cross-entrypoint mount attach is rejected.
 
 Script location: `scripts/qa-cli-daemon.sh`.
+
+## Benchmark Run
+
+For a rough performance signal on larger trees, run:
+
+```bash
+pnpm bench:cli-daemon
+```
+
+This benchmark:
+- creates two layers with many files
+- measures a layer attach switch into a fixed user mount path
+- measures replay latency from a layer mount back into the attached user mount
+- prints timing output in milliseconds
+
+Useful env vars:
+- `SPACES_BENCH_BUILD_ARTIFACTS=0` to reuse existing release artifacts
+- `SPACES_BENCH_FILE_COUNT=<n>` to scale the tree size
 
 ## Manual Smoke Sequence
 

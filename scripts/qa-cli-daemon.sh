@@ -26,10 +26,34 @@ WATCH_TIMEOUT_NOOP_MS="${SPACES_QA_WATCH_TIMEOUT_NOOP_MS:-800}"
 WATCH_TIMEOUT_REPLAY_MS="${SPACES_QA_WATCH_TIMEOUT_REPLAY_MS:-4000}"
 READ_POLL_SECONDS="${SPACES_QA_READ_POLL_SECONDS:-0.02}"
 READ_TIMEOUT_TICKS="${SPACES_QA_READ_TIMEOUT_TICKS:-20}"
+VITE_PORT="${SPACES_QA_VITE_PORT:-$((35000 + ($$ % 1000)))}"
 
 mkdir -p "$ENTRY" "$ENTRY2" "$MOUNTDIR" "$STATE" "$DATA" "$DBDIR" "$RUNTIME_ROOT"
 echo "hello" > "$ENTRY/file.txt"
 echo "hello-two" > "$ENTRY2/file.txt"
+mkdir -p "$ENTRY/src"
+cat > "$ENTRY/index.html" <<'EOF'
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>spaces qa vite</title>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>
+EOF
+cat > "$ENTRY/src/main.js" <<'EOF'
+import { message } from "./message.js";
+
+document.querySelector("#app").textContent = message;
+EOF
+cat > "$ENTRY/src/message.js" <<'EOF'
+export const message = "entry-vite";
+EOF
 
 # Clean up stale QA daemons and NFS mounts from interrupted runs.
 ps aux | awk '/spacesd-runtime\/bin\/java/ && /\/tmp\/spaces-qa-script\./ {print $2}' | xargs -I{} kill -9 {} 2>/dev/null || true
@@ -268,6 +292,22 @@ wait_for_path_exists() {
   return 1
 }
 
+wait_for_http_content() {
+  url="$1"
+  expected="$2"
+  attempts="${3:-$WAIT_LONG_ATTEMPTS}"
+
+  for _ in $(seq 1 "$attempts"); do
+    if body="$(curl -sf "$url" 2>/dev/null)"; then
+      if printf "%s" "$body" | rg -F "$expected" >/dev/null 2>&1; then
+        return 0
+      fi
+    fi
+    sleep "$WAIT_STEP_SECONDS"
+  done
+  return 1
+}
+
 run_hot_reload_switch_case() {
   name="$1"
   mount_id="$2"
@@ -280,7 +320,7 @@ run_hot_reload_switch_case() {
   watch_file="$(mktemp /tmp/spaces-qa-watch.XXXXXX)"
 
   set +e
-  node -e '
+  env -u NODE_OPTIONS node -e '
 const fs = require("fs");
 const root = process.argv[1];
 const needle = process.argv[2];
@@ -347,7 +387,7 @@ run_hot_reload_noop_attach_case() {
   wait_for_content "$stable_path" "$expected" "$WAIT_MEDIUM_ATTEMPTS" && baseline_code=0
 
   set +e
-  node -e '
+  env -u NODE_OPTIONS node -e '
 const fs = require("fs");
 const root = process.argv[1];
 const timeoutMs = Number(process.argv[2] || "800");
@@ -410,7 +450,7 @@ run_hot_reload_switch_delta_case() {
   watch_file="$(mktemp /tmp/spaces-qa-watch.XXXXXX)"
 
   set +e
-  node -e '
+  env -u NODE_OPTIONS node -e '
 const fs = require("fs");
 const root = process.argv[1];
 const needle = process.argv[2];
@@ -484,7 +524,7 @@ run_replication_nested_tree_case() {
   watch_file="$(mktemp /tmp/spaces-qa-watch.XXXXXX)"
 
   set +e
-  node -e '
+  env -u NODE_OPTIONS node -e '
 const fs = require("fs");
 const root = process.argv[1];
 const needle = process.argv[2];
@@ -560,7 +600,7 @@ run_overlay_delete_case() {
   wait_for_path_exists "$watch_path/$relative" "$WAIT_LONG_ATTEMPTS" && baseline_watch=0
 
   set +e
-  node -e '
+  env -u NODE_OPTIONS node -e '
 const fs = require("fs");
 const root = process.argv[1];
 const timeoutMs = Number(process.argv[2] || "3000");
@@ -637,7 +677,7 @@ run_overlay_rename_case() {
   wait_for_path_exists "$watch_path/$old_rel" "$WAIT_LONG_ATTEMPTS" && baseline_old_watch=0
 
   set +e
-  node -e '
+  env -u NODE_OPTIONS node -e '
 const fs = require("fs");
 const root = process.argv[1];
 const timeoutMs = Number(process.argv[2] || "3000");
@@ -707,6 +747,78 @@ const watcher = fs.watch(root, { recursive: true }, (eventType, filename) => {
   rm -f "$watch_file" /tmp/spaces-qa-live-rename.err
 }
 
+run_vite_hot_swap_case() {
+  name="$1"
+  mount_id="$2"
+  next_layer_id="$3"
+  serve_path="$4"
+  initial_marker="$5"
+  expected_marker="$6"
+  vite_log="$(mktemp /tmp/spaces-qa-vite.XXXXXX)"
+
+  set +e
+  source_ready=1
+  wait_for_path_exists "$serve_path/index.html" "$WAIT_LONG_ATTEMPTS" &&
+    wait_for_path_exists "$serve_path/src/main.js" "$WAIT_LONG_ATTEMPTS" &&
+    wait_for_path_exists "$serve_path/src/message.js" "$WAIT_LONG_ATTEMPTS" &&
+    source_ready=0
+
+  vite_pid=""
+  vite_ready=1
+  if [ "$source_ready" -eq 0 ]; then
+    sh -lc "cd '$ROOT_DIR/packages/web' && env -u NODE_OPTIONS pnpm exec vite '$serve_path' --host 127.0.0.1 --port '$VITE_PORT' --strictPort --clearScreen false" >"$vite_log" 2>&1 &
+    vite_pid=$!
+    for _ in $(seq 1 "$WAIT_LONG_ATTEMPTS"); do
+      if curl -sf "http://127.0.0.1:$VITE_PORT/" >/dev/null 2>&1; then
+        vite_ready=0
+        break
+      fi
+      sleep "$WAIT_STEP_SECONDS"
+    done
+  fi
+
+  baseline_code=1
+  if [ "$vite_ready" -eq 0 ]; then
+    main_code=1
+    wait_for_http_content "http://127.0.0.1:$VITE_PORT/src/main.js" "querySelector" "$WAIT_LONG_ATTEMPTS" && main_code=0
+    if [ "$main_code" -eq 0 ]; then
+      wait_for_http_content "http://127.0.0.1:$VITE_PORT/src/message.js" "$initial_marker" "$WAIT_LONG_ATTEMPTS" && baseline_code=0
+    fi
+  fi
+
+  attach_out="$(sh -lc "$CMD mount attach '$mount_id' '$next_layer_id' --json" 2>&1)"
+  attach_code=$?
+
+  served_code=1
+  wait_for_http_content "http://127.0.0.1:$VITE_PORT/src/message.js" "$expected_marker" "$WAIT_LONG_ATTEMPTS" && served_code=0
+  served_body="$(curl -sf "http://127.0.0.1:$VITE_PORT/src/message.js" 2>/dev/null || true)"
+  main_body="$(curl -sf "http://127.0.0.1:$VITE_PORT/src/main.js" 2>/dev/null || true)"
+
+  if [ -n "$vite_pid" ]; then
+    kill "$vite_pid" >/dev/null 2>&1 || true
+    wait "$vite_pid" >/dev/null 2>&1 || true
+  fi
+  set -e
+
+  if [ "$source_ready" -eq 0 ] &&
+    [ "$vite_ready" -eq 0 ] &&
+    [ "$baseline_code" -eq 0 ] &&
+    [ "$attach_code" -eq 0 ] &&
+    [ "$served_code" -eq 0 ]; then
+    printf "PASS | %s\n" "$name"
+    PASS=$((PASS + 1))
+  else
+    printf "FAIL | %s\n" "$name"
+    FAIL=$((FAIL + 1))
+  fi
+
+  printf "%s\n" "$attach_out" | sed -n '1,8p'
+  sed -n '1,12p' "$vite_log"
+  printf "main-module=%s\n" "$(printf "%s" "$main_body" | tr '\n' ' ' | sed 's/  */ /g')"
+  printf "served-marker=%s\n\n" "$(printf "%s" "$served_body" | tr '\n' ' ' | sed 's/  */ /g')"
+  rm -f "$vite_log"
+}
+
 run_case "daemon start" 0 sh -lc "$CMD daemon start"
 for _ in $(seq 1 40); do
   curl -sf "http://127.0.0.1:$API_PORT/system/health" >/dev/null 2>&1 && break
@@ -727,7 +839,7 @@ else
   printf "PASS | entrypoint create\n"
   PASS=$((PASS + 1))
   printf "%s\n\n" "$EP_JSON" | sed -n '1,8p'
-  EP_ID="$(printf "%s" "$EP_JSON" | node -e 'const fs=require("fs");const j=JSON.parse(fs.readFileSync(0,"utf8"));process.stdout.write(j.id||"")')"
+  EP_ID="$(printf "%s" "$EP_JSON" | env -u NODE_OPTIONS node -e 'const fs=require("fs");const j=JSON.parse(fs.readFileSync(0,"utf8"));process.stdout.write(j.id||"")')"
 fi
 
 run_case "entrypoint list alias e" 0 sh -lc "$CMD e list --json"
@@ -753,9 +865,9 @@ if [ -n "$EP_ID" ]; then
     printf "PASS | layer create\n"
     PASS=$((PASS + 1))
     printf "%s\n\n" "$L_JSON" | sed -n '1,8p'
-    LAYER_ID="$(printf "%s" "$L_JSON" | node -e 'const fs=require("fs");const j=JSON.parse(fs.readFileSync(0,"utf8"));process.stdout.write(j.id||"")')"
-    LAYER_MOUNT_PATH="$(printf "%s" "$L_JSON" | node -e 'const fs=require("fs");const j=JSON.parse(fs.readFileSync(0,"utf8"));process.stdout.write(j.mountPath||"")')"
-    LAYER_UPPER_DIR="$(printf "%s" "$L_JSON" | node -e 'const fs=require("fs");const j=JSON.parse(fs.readFileSync(0,"utf8"));process.stdout.write(j.upperDir||"")')"
+    LAYER_ID="$(printf "%s" "$L_JSON" | env -u NODE_OPTIONS node -e 'const fs=require("fs");const j=JSON.parse(fs.readFileSync(0,"utf8"));process.stdout.write(j.id||"")')"
+    LAYER_MOUNT_PATH="$(printf "%s" "$L_JSON" | env -u NODE_OPTIONS node -e 'const fs=require("fs");const j=JSON.parse(fs.readFileSync(0,"utf8"));process.stdout.write(j.mountPath||"")')"
+    LAYER_UPPER_DIR="$(printf "%s" "$L_JSON" | env -u NODE_OPTIONS node -e 'const fs=require("fs");const j=JSON.parse(fs.readFileSync(0,"utf8"));process.stdout.write(j.upperDir||"")')"
   fi
 fi
 
@@ -768,7 +880,7 @@ else
 fi
 
 run_case "mount list" 0 sh -lc "$CMD mount list --json"
-MOUNT_ID="$(sh -lc "$CMD mount list --json" 2>/dev/null | node -e 'const fs=require("fs");const s=fs.readFileSync(0,"utf8");try{const j=JSON.parse(s);if(Array.isArray(j)&&j[0]?.id)process.stdout.write(j[0].id)}catch{}')"
+MOUNT_ID="$(sh -lc "$CMD mount list --json" 2>/dev/null | env -u NODE_OPTIONS node -e 'const fs=require("fs");const s=fs.readFileSync(0,"utf8");try{const j=JSON.parse(s);if(Array.isArray(j)&&j[0]?.id)process.stdout.write(j[0].id)}catch{}')"
 EP2_ID=""
 LAYER_EP2_ID=""
 LAYER2_ID=""
@@ -808,9 +920,9 @@ if [ -n "$MOUNT_ID" ]; then
       printf "PASS | layer create 2\n"
       PASS=$((PASS + 1))
       printf "%s\n\n" "$L2_JSON" | sed -n '1,8p'
-      LAYER2_ID="$(printf "%s" "$L2_JSON" | node -e 'const fs=require("fs");const j=JSON.parse(fs.readFileSync(0,"utf8"));process.stdout.write(j.id||"")')"
-      LAYER2_MOUNT_PATH="$(printf "%s" "$L2_JSON" | node -e 'const fs=require("fs");const j=JSON.parse(fs.readFileSync(0,"utf8"));process.stdout.write(j.mountPath||"")')"
-      LAYER2_UPPER_DIR="$(printf "%s" "$L2_JSON" | node -e 'const fs=require("fs");const j=JSON.parse(fs.readFileSync(0,"utf8"));process.stdout.write(j.upperDir||"")')"
+      LAYER2_ID="$(printf "%s" "$L2_JSON" | env -u NODE_OPTIONS node -e 'const fs=require("fs");const j=JSON.parse(fs.readFileSync(0,"utf8"));process.stdout.write(j.id||"")')"
+      LAYER2_MOUNT_PATH="$(printf "%s" "$L2_JSON" | env -u NODE_OPTIONS node -e 'const fs=require("fs");const j=JSON.parse(fs.readFileSync(0,"utf8"));process.stdout.write(j.mountPath||"")')"
+      LAYER2_UPPER_DIR="$(printf "%s" "$L2_JSON" | env -u NODE_OPTIONS node -e 'const fs=require("fs");const j=JSON.parse(fs.readFileSync(0,"utf8"));process.stdout.write(j.upperDir||"")')"
     fi
   fi
 
@@ -821,6 +933,8 @@ if [ -n "$MOUNT_ID" ]; then
     printf "renamed-two\n" > "$LAYER_UPPER_DIR/delta-renamed-old.txt" || true
     mkdir -p "$LAYER_UPPER_DIR/nested/deep" || true
     printf "deep-one\n" > "$LAYER_UPPER_DIR/nested/deep/file.txt" || true
+    mkdir -p "$LAYER_UPPER_DIR/src" || true
+    printf 'export const message = "layer-one-vite";\n' > "$LAYER_UPPER_DIR/src/message.js" || true
   fi
   if [ -n "$LAYER2_UPPER_DIR" ]; then
     mkdir -p "$LAYER2_UPPER_DIR" || true
@@ -829,6 +943,8 @@ if [ -n "$MOUNT_ID" ]; then
     printf "renamed-two\n" > "$LAYER2_UPPER_DIR/delta-renamed-new.txt" || true
     mkdir -p "$LAYER2_UPPER_DIR/nested/deep" || true
     printf "deep-two\n" > "$LAYER2_UPPER_DIR/nested/deep/file.txt" || true
+    mkdir -p "$LAYER2_UPPER_DIR/src" || true
+    printf 'export const message = "layer-two-vite";\n' > "$LAYER2_UPPER_DIR/src/message.js" || true
   fi
 
   if [ -n "$LAYER_ID" ]; then
@@ -837,6 +953,8 @@ if [ -n "$MOUNT_ID" ]; then
 
   if [ -n "$LAYER2_ID" ]; then
     run_hot_reload_switch_case "mount attach switch emits watcher event + content update" "$MOUNT_ID" "$LAYER2_ID" "$MOUNTDIR" "hot-switch.txt" "hot-switch.txt" "layer-two"
+    run_case "mount attach reset to layer1 for vite dev-server case" 0 sh -lc "$CMD mount attach '$MOUNT_ID' '$LAYER_ID' --json"
+    run_vite_hot_swap_case "vite dev server serves updated mounted content after layer hot swap" "$MOUNT_ID" "$LAYER2_ID" "$MOUNTDIR" "layer-one-vite" "layer-two-vite"
   fi
 
   if [ -n "$LAYER_ID" ] && [ -n "$LAYER2_ID" ]; then
@@ -868,9 +986,9 @@ if [ -n "$MOUNT_ID" ]; then
       printf "PASS | layer create parent-a\n"
       PASS=$((PASS + 1))
       printf "%s\n\n" "$P1_JSON" | sed -n '1,8p'
-      PARENT1_ID="$(printf "%s" "$P1_JSON" | node -e 'const fs=require("fs");const j=JSON.parse(fs.readFileSync(0,"utf8"));process.stdout.write(j.id||"")')"
-      PARENT1_MOUNT_PATH="$(printf "%s" "$P1_JSON" | node -e 'const fs=require("fs");const j=JSON.parse(fs.readFileSync(0,"utf8"));process.stdout.write(j.mountPath||"")')"
-      PARENT1_UPPER_DIR="$(printf "%s" "$P1_JSON" | node -e 'const fs=require("fs");const j=JSON.parse(fs.readFileSync(0,"utf8"));process.stdout.write(j.upperDir||"")')"
+      PARENT1_ID="$(printf "%s" "$P1_JSON" | env -u NODE_OPTIONS node -e 'const fs=require("fs");const j=JSON.parse(fs.readFileSync(0,"utf8"));process.stdout.write(j.id||"")')"
+      PARENT1_MOUNT_PATH="$(printf "%s" "$P1_JSON" | env -u NODE_OPTIONS node -e 'const fs=require("fs");const j=JSON.parse(fs.readFileSync(0,"utf8"));process.stdout.write(j.mountPath||"")')"
+      PARENT1_UPPER_DIR="$(printf "%s" "$P1_JSON" | env -u NODE_OPTIONS node -e 'const fs=require("fs");const j=JSON.parse(fs.readFileSync(0,"utf8"));process.stdout.write(j.upperDir||"")')"
     fi
 
     if [ -n "$PARENT1_ID" ]; then
@@ -889,8 +1007,8 @@ if [ -n "$MOUNT_ID" ]; then
         printf "PASS | layer create child-a\n"
         PASS=$((PASS + 1))
         printf "%s\n\n" "$C1_JSON" | sed -n '1,8p'
-        CHILD1_ID="$(printf "%s" "$C1_JSON" | node -e 'const fs=require("fs");const j=JSON.parse(fs.readFileSync(0,"utf8"));process.stdout.write(j.id||"")')"
-        CHILD1_MOUNT_PATH="$(printf "%s" "$C1_JSON" | node -e 'const fs=require("fs");const j=JSON.parse(fs.readFileSync(0,"utf8"));process.stdout.write(j.mountPath||"")')"
+        CHILD1_ID="$(printf "%s" "$C1_JSON" | env -u NODE_OPTIONS node -e 'const fs=require("fs");const j=JSON.parse(fs.readFileSync(0,"utf8"));process.stdout.write(j.id||"")')"
+        CHILD1_MOUNT_PATH="$(printf "%s" "$C1_JSON" | env -u NODE_OPTIONS node -e 'const fs=require("fs");const j=JSON.parse(fs.readFileSync(0,"utf8"));process.stdout.write(j.mountPath||"")')"
       fi
     fi
 
@@ -909,9 +1027,9 @@ if [ -n "$MOUNT_ID" ]; then
       printf "PASS | layer create parent-b\n"
       PASS=$((PASS + 1))
       printf "%s\n\n" "$P2_JSON" | sed -n '1,8p'
-      PARENT2_ID="$(printf "%s" "$P2_JSON" | node -e 'const fs=require("fs");const j=JSON.parse(fs.readFileSync(0,"utf8"));process.stdout.write(j.id||"")')"
-      PARENT2_MOUNT_PATH="$(printf "%s" "$P2_JSON" | node -e 'const fs=require("fs");const j=JSON.parse(fs.readFileSync(0,"utf8"));process.stdout.write(j.mountPath||"")')"
-      PARENT2_UPPER_DIR="$(printf "%s" "$P2_JSON" | node -e 'const fs=require("fs");const j=JSON.parse(fs.readFileSync(0,"utf8"));process.stdout.write(j.upperDir||"")')"
+      PARENT2_ID="$(printf "%s" "$P2_JSON" | env -u NODE_OPTIONS node -e 'const fs=require("fs");const j=JSON.parse(fs.readFileSync(0,"utf8"));process.stdout.write(j.id||"")')"
+      PARENT2_MOUNT_PATH="$(printf "%s" "$P2_JSON" | env -u NODE_OPTIONS node -e 'const fs=require("fs");const j=JSON.parse(fs.readFileSync(0,"utf8"));process.stdout.write(j.mountPath||"")')"
+      PARENT2_UPPER_DIR="$(printf "%s" "$P2_JSON" | env -u NODE_OPTIONS node -e 'const fs=require("fs");const j=JSON.parse(fs.readFileSync(0,"utf8"));process.stdout.write(j.upperDir||"")')"
     fi
 
     if [ -n "$PARENT2_ID" ]; then
@@ -930,8 +1048,8 @@ if [ -n "$MOUNT_ID" ]; then
         printf "PASS | layer create child-b\n"
         PASS=$((PASS + 1))
         printf "%s\n\n" "$C2_JSON" | sed -n '1,8p'
-        CHILD2_ID="$(printf "%s" "$C2_JSON" | node -e 'const fs=require("fs");const j=JSON.parse(fs.readFileSync(0,"utf8"));process.stdout.write(j.id||"")')"
-        CHILD2_MOUNT_PATH="$(printf "%s" "$C2_JSON" | node -e 'const fs=require("fs");const j=JSON.parse(fs.readFileSync(0,"utf8"));process.stdout.write(j.mountPath||"")')"
+        CHILD2_ID="$(printf "%s" "$C2_JSON" | env -u NODE_OPTIONS node -e 'const fs=require("fs");const j=JSON.parse(fs.readFileSync(0,"utf8"));process.stdout.write(j.id||"")')"
+        CHILD2_MOUNT_PATH="$(printf "%s" "$C2_JSON" | env -u NODE_OPTIONS node -e 'const fs=require("fs");const j=JSON.parse(fs.readFileSync(0,"utf8"));process.stdout.write(j.mountPath||"")')"
       fi
     fi
   fi
@@ -969,7 +1087,7 @@ if [ -n "$MOUNT_ID" ]; then
     printf "PASS | entrypoint create 2\n"
     PASS=$((PASS + 1))
     printf "%s\n\n" "$EP2_JSON" | sed -n '1,8p'
-    EP2_ID="$(printf "%s" "$EP2_JSON" | node -e 'const fs=require("fs");const j=JSON.parse(fs.readFileSync(0,"utf8"));process.stdout.write(j.id||"")')"
+    EP2_ID="$(printf "%s" "$EP2_JSON" | env -u NODE_OPTIONS node -e 'const fs=require("fs");const j=JSON.parse(fs.readFileSync(0,"utf8"));process.stdout.write(j.id||"")')"
   fi
 
   if [ -n "$EP2_ID" ]; then
@@ -988,7 +1106,7 @@ if [ -n "$MOUNT_ID" ]; then
       printf "PASS | layer create other entrypoint\n"
       PASS=$((PASS + 1))
       printf "%s\n\n" "$L_EP2_JSON" | sed -n '1,8p'
-      LAYER_EP2_ID="$(printf "%s" "$L_EP2_JSON" | node -e 'const fs=require("fs");const j=JSON.parse(fs.readFileSync(0,"utf8"));process.stdout.write(j.id||"")')"
+      LAYER_EP2_ID="$(printf "%s" "$L_EP2_JSON" | env -u NODE_OPTIONS node -e 'const fs=require("fs");const j=JSON.parse(fs.readFileSync(0,"utf8"));process.stdout.write(j.id||"")')"
     fi
   fi
   if [ -n "$LAYER_EP2_ID" ]; then

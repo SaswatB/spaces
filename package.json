@@ -12,6 +12,7 @@
     "openapi:generate": "cp packages/daemon-jvm/src/main/resources/openapi.json packages/web/src/lib/openapi.json && pnpm --filter @spaces/web exec openapi-typescript ./src/lib/openapi.json --output ./src/lib/openapi-types.ts",
     "openapi:check": "sh ./scripts/check-openapi-sync.sh",
     "qa:cli-daemon": "sh ./scripts/qa-cli-daemon.sh",
+    "bench:cli-daemon": "sh ./scripts/bench-cli-daemon.sh",
     "release:artifacts": "sh ./scripts/build-release-artifacts.sh",
     "install:release": "sh ./scripts/install.sh",
     "uninstall:release": "sh ./scripts/uninstall.sh",
