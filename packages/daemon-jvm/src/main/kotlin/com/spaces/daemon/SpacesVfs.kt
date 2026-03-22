@@ -1223,7 +1223,7 @@ class SpacesVfs(private val db: SpacesDatabase) : VirtualFileSystem {
     }
 
     private fun replayUpsert(sourceMount: MountView, targetRoot: Path, relative: String) {
-        val source = overlay.resolvePath(sourceMount.view, relative)?.source
+        val source = resolveReplaySource(sourceMount, relative)
         if (source == null) return
         val target = targetRoot.resolve(relative)
         if (Files.isDirectory(source)) {
@@ -1314,6 +1314,19 @@ class SpacesVfs(private val db: SpacesDatabase) : VirtualFileSystem {
             return
         }
         copyFile(source, target)
+    }
+
+    private fun resolveReplaySource(sourceMount: MountView, relative: String): Path? {
+        repeat(10) { attempt ->
+            val source = overlay.resolvePath(sourceMount.view, relative)?.source
+            if (source != null && (Files.exists(source) || Files.isSymbolicLink(source))) {
+                return source
+            }
+            if (attempt < 9) {
+                Thread.sleep(5)
+            }
+        }
+        return overlay.resolvePath(sourceMount.view, relative)?.source
     }
 
     private fun copyFile(source: Path, target: Path) {

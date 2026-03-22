@@ -3,8 +3,10 @@ package com.spaces.daemon
 import java.time.Duration
 import java.time.Instant
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.serialization.Serializable
 import org.slf4j.LoggerFactory
 
@@ -58,6 +60,8 @@ class ReplicationService(
     private val pendingReplayTasks = AtomicInteger(0)
     private val pendingInvalidationTasks = AtomicInteger(0)
     private val pendingInvalidationByMount = ConcurrentHashMap<String, AtomicInteger>()
+    private val replayQueuesByTarget = ConcurrentHashMap<String, ConcurrentLinkedQueue<ReplayWorkItem>>()
+    private val replayDrainScheduledByTarget = ConcurrentHashMap<String, AtomicBoolean>()
 
     fun handleOp(op: NfsOp) {
         if (isReplicationIgnoredOp(op)) {
@@ -73,32 +77,7 @@ class ReplicationService(
             if (targetMountId == op.mountId) continue
             val targetKey = suppressionKey(op.copy(mountId = targetMountId))
             engine.suppress(targetKey)
-            val queuedAt = System.nanoTime()
-            pendingReplayTasks.incrementAndGet()
-            // Dispatch replay off the serving NFS thread.
-            // Replay can touch mount paths to generate watcher-visible fs events, and we do not
-            // want that I/O to synchronously re-enter NFS handling for the current request.
-            serialReplayDispatch.execute {
-                try {
-                    PerfStats.observe("replication.replay.queue_delay", System.nanoTime() - queuedAt)
-                    val runStart = System.nanoTime()
-                    runCatching { vfs.replay(op.mountId, targetMountId, op) }
-                            .onFailure { error ->
-                                logger.warn(
-                                        "Replay failed sourceMountId={} targetMountId={} opKind={} path={} targetPath={}",
-                                        op.mountId,
-                                        targetMountId,
-                                        op.kind,
-                                        op.relativePath,
-                                        op.targetRelativePath,
-                                        error
-                                )
-                            }
-                    PerfStats.observe("replication.replay.task", System.nanoTime() - runStart)
-                } finally {
-                    pendingReplayTasks.decrementAndGet()
-                }
-            }
+            enqueueReplay(targetMountId, ReplayWorkItem(op.mountId, targetMountId, op, System.nanoTime()))
         }
     }
 
@@ -185,6 +164,166 @@ class ReplicationService(
         return pendingInvalidationByMount.computeIfAbsent(mountPath) { AtomicInteger(0) }
     }
 
+    private fun enqueueReplay(targetMountId: String, item: ReplayWorkItem) {
+        pendingReplayTasks.incrementAndGet()
+        replayQueuesByTarget.computeIfAbsent(targetMountId) { ConcurrentLinkedQueue() }.add(item)
+        scheduleReplayDrain(targetMountId)
+    }
+
+    private fun scheduleReplayDrain(targetMountId: String) {
+        val scheduled =
+                replayDrainScheduledByTarget.computeIfAbsent(targetMountId) { AtomicBoolean(false) }
+        if (!scheduled.compareAndSet(false, true)) {
+            return
+        }
+        // Dispatch replay off the serving NFS thread.
+        // Replay can touch mount paths to generate watcher-visible fs events, and we do not want
+        // that I/O to synchronously re-enter NFS handling for the current request.
+        serialReplayDispatch.execute { drainReplayQueue(targetMountId, scheduled) }
+    }
+
+    private fun drainReplayQueue(targetMountId: String, scheduled: AtomicBoolean) {
+        try {
+            PerfStats.timed("replication.replay.batch") {
+                val queue = replayQueuesByTarget[targetMountId] ?: return@timed
+                while (true) {
+                    val drained = drainPendingReplayBatch(queue)
+                    if (drained.isEmpty()) break
+                    for (item in normalizeReplayBatch(drained)) {
+                        PerfStats.observe(
+                                "replication.replay.queue_delay",
+                                System.nanoTime() - item.queuedAtNanos
+                        )
+                        val runStart = System.nanoTime()
+                        runCatching { vfs.replay(item.sourceMountId, item.targetMountId, item.op) }
+                                .onFailure { error ->
+                                    logger.warn(
+                                            "Replay failed sourceMountId={} targetMountId={} opKind={} path={} targetPath={}",
+                                            item.sourceMountId,
+                                            item.targetMountId,
+                                            item.op.kind,
+                                            item.op.relativePath,
+                                            item.op.targetRelativePath,
+                                            error
+                                    )
+                                }
+                        PerfStats.observe("replication.replay.task", System.nanoTime() - runStart)
+                    }
+                }
+            }
+        } finally {
+            scheduled.set(false)
+            val queue = replayQueuesByTarget[targetMountId]
+            if (queue != null && queue.isNotEmpty()) {
+                scheduleReplayDrain(targetMountId)
+            }
+        }
+    }
+
+    private fun drainPendingReplayBatch(
+            queue: ConcurrentLinkedQueue<ReplayWorkItem>
+    ): List<ReplayWorkItem> {
+        val drained = mutableListOf<ReplayWorkItem>()
+        while (true) {
+            val item = queue.poll() ?: break
+            drained.add(item)
+        }
+        if (drained.isNotEmpty()) {
+            pendingReplayTasks.addAndGet(-drained.size)
+        }
+        return drained
+    }
+
+    private fun normalizeReplayBatch(items: List<ReplayWorkItem>): List<ReplayWorkItem> {
+        val upserts = mutableListOf<ReplayWorkItem>()
+        val lastUpsertIndexByPath = mutableMapOf<String, Int>()
+        val reconcileParents = LinkedHashMap<String, ReplayWorkItem>()
+        var pulseItem: ReplayWorkItem? = null
+        for (item in items) {
+            val key = replayPathKey(item)
+            when (item.op.kind) {
+                NfsOpKind.Create, NfsOpKind.Write, NfsOpKind.Mkdir, NfsOpKind.Setattr -> {
+                    val existingIndex = lastUpsertIndexByPath[key]
+                    if (existingIndex != null) {
+                        upserts[existingIndex] = item
+                    } else {
+                        upserts.add(item)
+                        lastUpsertIndexByPath[key] = upserts.lastIndex
+                    }
+                }
+                NfsOpKind.Remove, NfsOpKind.Rmdir -> {
+                    lastUpsertIndexByPath.remove(key)
+                    if (shouldPulseInsteadOfReplay(item)) {
+                        pulseItem = pulseItem ?: item
+                    } else {
+                        reconcileParents[parentRelativePath(item.op.relativePath)] =
+                                replayDirectoryItem(item, parentRelativePath(item.op.relativePath))
+                    }
+                }
+                NfsOpKind.Rename -> {
+                    lastUpsertIndexByPath.remove(key)
+                    item.op.targetRelativePath?.let { target ->
+                        lastUpsertIndexByPath.remove(replayPathKey(item, target))
+                    }
+                    if (shouldPulseInsteadOfReplay(item)) {
+                        pulseItem = pulseItem ?: item
+                    } else {
+                        val fromParent = parentRelativePath(item.op.relativePath)
+                        reconcileParents[fromParent] = replayDirectoryItem(item, fromParent)
+                        val toParent = parentRelativePath(item.op.targetRelativePath.orEmpty())
+                        reconcileParents[toParent] = replayDirectoryItem(item, toParent)
+                    }
+                }
+            }
+        }
+        val normalized = mutableListOf<ReplayWorkItem>()
+        normalized.addAll(upserts)
+        normalized.addAll(reconcileParents.values)
+        if (pulseItem != null) {
+            normalized.add(pulseItem)
+        }
+        return normalized
+    }
+
+    private fun replayPathKey(
+            item: ReplayWorkItem,
+            relativePath: String = item.op.relativePath
+    ): String {
+        return "${item.sourceMountId}\n$relativePath"
+    }
+
+    private fun replayDirectoryItem(item: ReplayWorkItem, relativePath: String): ReplayWorkItem {
+        return item.copy(op = NfsOp(item.op.mountId, relativePath, NfsOpKind.Mkdir))
+    }
+
+    private fun parentRelativePath(relativePath: String): String {
+        if (relativePath.isBlank()) return ""
+        val normalized = relativePath.trim('/')
+        if (normalized.isEmpty()) return ""
+        val slashIndex = normalized.lastIndexOf('/')
+        return if (slashIndex < 0) "" else normalized.substring(0, slashIndex)
+    }
+
+    private fun shouldPulseInsteadOfReplay(item: ReplayWorkItem): Boolean {
+        if (item.op.kind != NfsOpKind.Remove &&
+                        item.op.kind != NfsOpKind.Rmdir &&
+                        item.op.kind != NfsOpKind.Rename
+        ) {
+            return false
+        }
+        val targetUserMount = db.getUserMount(item.targetMountId) ?: return false
+        val sourceLayerId = underlyingLayerId(item.sourceMountId) ?: return false
+        return targetUserMount.attachedLayerId == sourceLayerId
+    }
+
+    private fun underlyingLayerId(mountId: String): String? {
+        val userMount = db.getUserMount(mountId)
+        if (userMount != null) {
+            return userMount.attachedLayerId
+        }
+        return if (db.getLayer(mountId) != null) mountId else null
+    }
+
     private fun suppressionKey(op: NfsOp): String {
         val renameSuffix =
                 if (op.kind == NfsOpKind.Rename) ":${op.targetRelativePath.orEmpty()}" else ""
@@ -207,6 +346,13 @@ class ReplicationService(
         }
     }
 }
+
+private data class ReplayWorkItem(
+        val sourceMountId: String,
+        val targetMountId: String,
+        val op: NfsOp,
+        val queuedAtNanos: Long
+)
 
 @Serializable
 data class ReplicationIdleSnapshot(
