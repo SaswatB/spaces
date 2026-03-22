@@ -1058,36 +1058,27 @@ class SpacesVfs(private val db: SpacesDatabase) : VirtualFileSystem {
     private fun fingerprintPath(view: OverlayView, relative: String): String {
         val resolved = overlay.resolvePath(view, relative) ?: return "missing"
         val source = resolved.source
+        val normalizedSource = source.normalize().toString()
         return when {
             Files.isDirectory(source) -> {
                 val entries = overlay.listDir(view, relative).sorted().joinToString("\n")
-                "dir:${sha256Bytes(entries.toByteArray())}"
+                "dir:$normalizedSource:$entries"
             }
             Files.isSymbolicLink(source) -> {
                 val target =
                         runCatching { Files.readSymbolicLink(source).toString() }.getOrDefault("")
-                "symlink:$target"
+                "symlink:$normalizedSource:$target"
             }
-            else -> "file:${sha256File(source)}"
-        }
-    }
-
-    private fun sha256File(path: Path): String {
-        val digest = MessageDigest.getInstance("SHA-256")
-        Files.newInputStream(path).use { stream ->
-            val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
-            while (true) {
-                val read = stream.read(buffer)
-                if (read <= 0) break
-                digest.update(buffer, 0, read)
+            else -> {
+                val attrs =
+                        Files.readAttributes(
+                                source,
+                                BasicFileAttributes::class.java,
+                                LinkOption.NOFOLLOW_LINKS
+                        )
+                "file:$normalizedSource:${attrs.size()}:${attrs.lastModifiedTime().toMillis()}"
             }
         }
-        return digest.digest().joinToString("") { "%02x".format(it) }
-    }
-
-    private fun sha256Bytes(bytes: ByteArray): String {
-        val digest = MessageDigest.getInstance("SHA-256").digest(bytes)
-        return digest.joinToString("") { "%02x".format(it) }
     }
 
     private fun emitSwitchPulseEvent(mountRoot: Path) {
@@ -1300,6 +1291,13 @@ class SpacesVfs(private val db: SpacesDatabase) : VirtualFileSystem {
 
     private fun copyFile(source: Path, target: Path) {
         if (!Files.exists(source) || Files.isDirectory(source)) return
+        if (Files.exists(target) &&
+                        !Files.isDirectory(target) &&
+                        !Files.isSymbolicLink(target) &&
+                        isUnchangedRegularFile(source, target)
+        ) {
+            return
+        }
         val parent = target.parent
         if (parent != null) {
             Files.createDirectories(parent)
@@ -1310,6 +1308,30 @@ class SpacesVfs(private val db: SpacesDatabase) : VirtualFileSystem {
                 StandardCopyOption.REPLACE_EXISTING,
                 StandardCopyOption.COPY_ATTRIBUTES
         )
+    }
+
+    private fun isUnchangedRegularFile(source: Path, target: Path): Boolean {
+        val sourceAttrs =
+                runCatching {
+                            Files.readAttributes(
+                                    source,
+                                    BasicFileAttributes::class.java,
+                                    LinkOption.NOFOLLOW_LINKS
+                            )
+                        }
+                        .getOrNull() ?: return false
+        val targetAttrs =
+                runCatching {
+                            Files.readAttributes(
+                                    target,
+                                    BasicFileAttributes::class.java,
+                                    LinkOption.NOFOLLOW_LINKS
+                            )
+                        }
+                        .getOrNull() ?: return false
+        if (!sourceAttrs.isRegularFile || !targetAttrs.isRegularFile) return false
+        return sourceAttrs.size() == targetAttrs.size() &&
+                sourceAttrs.lastModifiedTime() == targetAttrs.lastModifiedTime()
     }
 
     private fun copySymlink(source: Path, target: Path) {
