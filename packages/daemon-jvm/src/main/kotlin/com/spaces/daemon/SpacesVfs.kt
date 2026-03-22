@@ -23,6 +23,7 @@ import org.dcache.nfs.status.NoEntException
 import org.dcache.nfs.status.NotDirException
 import org.dcache.nfs.status.NotEmptyException
 import org.dcache.nfs.status.PermException
+import org.dcache.nfs.status.StaleException
 import org.dcache.nfs.v4.NfsIdMapping
 import org.dcache.nfs.v4.Stateids
 import org.dcache.nfs.v4.xdr.nfs4_prot
@@ -41,13 +42,23 @@ class SpacesVfs(private val db: SpacesDatabase) : VirtualFileSystem {
     private val logger = LoggerFactory.getLogger(SpacesVfs::class.java)
     private val overlay = OverlayEngine()
     private val idMapping = SimpleIdMapping()
-    private val handleToPath = ConcurrentHashMap<String, String>()
+    private val handleToPath = ConcurrentHashMap<String, HandleEntry>()
     private val handleToInode = ConcurrentHashMap<String, Inode>()
     private val openWriteHandles = ConcurrentHashMap<String, OpenHandle>()
     @Volatile private var opHandler: ((NfsOp) -> Unit)? = null
 
     fun setOpHandler(handler: (NfsOp) -> Unit) {
         opHandler = handler
+    }
+
+    fun invalidateMountState(mountId: String) {
+        val staleStateIds =
+                openWriteHandles.entries
+                        .filter { it.value.mountId == mountId }
+                        .map { it.key }
+        for (stateId in staleStateIds) {
+            closeOpenStateKey(stateId)
+        }
     }
 
     override fun access(inode: Inode, mode: Int): Int {
@@ -92,7 +103,7 @@ class SpacesVfs(private val db: SpacesDatabase) : VirtualFileSystem {
         }
         overlay.applyEntrypointOwner(mount.view, target)
         emitOp(mount, relative, NfsOpKind.Create)
-        return inodeForResolvedPath(resolved.mountPath, relative, target)
+        return inodeForMountPath(mount, relative, target)
     }
 
     override fun getFsStat(): FsStat = FsStat(0, 0, 0, 0)
@@ -124,7 +135,7 @@ class SpacesVfs(private val db: SpacesDatabase) : VirtualFileSystem {
                 val relative = resolveChildRelative(resolved, path)
                 val resolvedPath =
                         overlay.resolvePath(mount.view, relative) ?: throw NoEntException()
-                inodeForResolvedPath(resolved.mountPath, relative, resolvedPath.source)
+                inodeForMountPath(mount, relative, resolvedPath.source)
             }
             else -> throw NoEntException()
         }
@@ -156,7 +167,7 @@ class SpacesVfs(private val db: SpacesDatabase) : VirtualFileSystem {
         Files.createLink(targetPath, sourcePath)
         overlay.applyEntrypointOwner(mount.view, targetPath)
         emitOp(mount, targetRel, NfsOpKind.Create)
-        return inodeForResolvedPath(parentResolved.mountPath, targetRel, targetPath)
+        return inodeForMountPath(mount, targetRel, targetPath)
     }
 
     override fun list(dir: Inode, verifier: ByteArray, cookie: Long): NfsDirectoryStream {
@@ -255,7 +266,7 @@ class SpacesVfs(private val db: SpacesDatabase) : VirtualFileSystem {
         applyMode(target, mode)
         overlay.applyEntrypointOwner(mount.view, target)
         emitOp(mount, relative, NfsOpKind.Mkdir)
-        return inodeForResolvedPath(resolved.mountPath, relative, target)
+        return inodeForMountPath(mount, relative, target)
     }
 
     override fun move(from: Inode, oldName: String, to: Inode, newName: String): Boolean {
@@ -298,13 +309,13 @@ class SpacesVfs(private val db: SpacesDatabase) : VirtualFileSystem {
                 val mount = resolved.mountView ?: throw NoEntException()
                 val parentRel = Paths.get(resolved.relativePath).parent?.toString() ?: ""
                 if (parentRel.isEmpty()) {
-                    inodeForVirtualPath(resolved.mountPath, "")
+                    inodeForMountPath(mount, "", null)
                 } else {
                     val parentPath = overlay.resolvePath(mount.view, parentRel)
                     if (parentPath != null) {
-                        inodeForResolvedPath(resolved.mountPath, parentRel, parentPath.source)
+                        inodeForMountPath(mount, parentRel, parentPath.source)
                     } else {
-                        inodeForVirtualPath(resolved.mountPath, parentRel)
+                        inodeForMountPath(mount, parentRel, null)
                     }
                 }
             }
@@ -395,7 +406,7 @@ class SpacesVfs(private val db: SpacesDatabase) : VirtualFileSystem {
         Files.createSymbolicLink(linkPath, Paths.get(target))
         overlay.applyEntrypointOwner(mount.view, linkPath)
         emitOp(mount, rel, NfsOpKind.Create)
-        return inodeForResolvedPath(resolved.mountPath, rel, linkPath)
+        return inodeForMountPath(mount, rel, linkPath)
     }
 
     override fun write(
@@ -452,6 +463,10 @@ class SpacesVfs(private val db: SpacesDatabase) : VirtualFileSystem {
         val key = stateKey(stateid)
         val handle = openWriteHandles[key]
         if (handle != null) {
+            if (isStaleOpenHandle(handle)) {
+                closeOpenStateKey(key)
+                throw StaleException()
+            }
             val start = System.nanoTime()
             logOpStart("WRITE", handle.path.toString())
             return try {
@@ -476,9 +491,20 @@ class SpacesVfs(private val db: SpacesDatabase) : VirtualFileSystem {
         val key = stateKey(stateid)
         if (openWriteHandles.containsKey(key)) return
 
+        val resolved = resolveNode(inode)
+        requireKnown(resolved)
         val target = resolveWritableTarget(inode)
         val channel = FileChannel.open(target, StandardOpenOption.WRITE, StandardOpenOption.READ)
-        val existing = openWriteHandles.putIfAbsent(key, OpenHandle(channel, target))
+        val existing =
+                openWriteHandles.putIfAbsent(
+                        key,
+                        OpenHandle(
+                                channel = channel,
+                                path = target,
+                                mountId = resolved.mountId,
+                                mountGeneration = resolved.mountView?.mountGeneration
+                        )
+                )
         if (existing != null) {
             channel.close()
         }
@@ -491,13 +517,17 @@ class SpacesVfs(private val db: SpacesDatabase) : VirtualFileSystem {
     }
 
     fun closeOpenState(stateid: stateid4) {
-        val handle = openWriteHandles.remove(stateKey(stateid)) ?: return
+        closeOpenStateKey(stateKey(stateid))
+    }
+
+    private fun closeOpenStateKey(key: String) {
+        val handle = openWriteHandles.remove(key) ?: return
         try {
             handle.channel.close()
         } catch (e: Exception) {
             logger.warn(
                     "Failed to close open state stateid={} path={}",
-                    stateKey(stateid),
+                    key,
                     handle.path,
                     e
             )
@@ -598,7 +628,18 @@ class SpacesVfs(private val db: SpacesDatabase) : VirtualFileSystem {
         val path =
                 if (relative.isBlank()) root else root.trimEnd('/') + "/" + relative.trimStart('/')
         val handleBytes = hashBytes("virtual:$path")
-        return inodeForHandle(handleBytes, path)
+        return inodeForHandle(handleBytes, HandleEntry(path = path))
+    }
+
+    private fun inodeForUserMountPath(mount: UserMountRecord, relative: String): Inode {
+        val path =
+                if (relative.isBlank()) prefixPath("mounts/${mount.id}")
+                else prefixPath("mounts/${mount.id}/${relative.trimStart('/')}")
+        val handleBytes = hashBytes("mount:${mount.id}:generation:${mount.generation}:$relative")
+        return inodeForHandle(
+                handleBytes,
+                HandleEntry(path = path, mountId = mount.id, mountGeneration = mount.generation)
+        )
     }
 
     private fun inodeForResolvedPath(root: String, relative: String, sourcePath: Path?): Inode {
@@ -607,18 +648,30 @@ class SpacesVfs(private val db: SpacesDatabase) : VirtualFileSystem {
         val handleBytes =
                 if (sourcePath != null) handleForPath(sourcePath, followLinks = false)
                 else hashBytes("virtual:$path")
-        return inodeForHandle(handleBytes, path)
+        return inodeForHandle(handleBytes, HandleEntry(path = path))
     }
 
-    private fun inodeForHandle(handleBytes: ByteArray, path: String): Inode {
+    private fun inodeForMountPath(mount: MountView, relative: String, sourcePath: Path?): Inode {
+        if (mount.mountGeneration == null) {
+            return inodeForResolvedPath(prefixPath("layers/${mount.mountId}"), relative, sourcePath)
+        }
+        if (sourcePath == null || Files.isDirectory(sourcePath, LinkOption.NOFOLLOW_LINKS)) {
+            return inodeForVirtualPath(prefixPath("mounts/${mount.mountId}"), relative)
+        }
+        val mountRecord = db.getUserMount(mount.mountId)
+                ?: return inodeForResolvedPath(prefixPath("mounts/${mount.mountId}"), relative, sourcePath)
+        return inodeForUserMountPath(mountRecord, relative)
+    }
+
+    private fun inodeForHandle(handleBytes: ByteArray, entry: HandleEntry): Inode {
         val handleKey = handleKey(handleBytes)
-        handleToPath[handleKey] = path
+        handleToPath[handleKey] = entry
         return handleToInode.computeIfAbsent(handleKey) { Inode.forFile(handleBytes) }
     }
 
-    private fun pathFor(inode: Inode): String {
+    private fun handleEntryFor(inode: Inode): HandleEntry? {
         val handleKey = handleKey(inode.fileId)
-        return handleToPath[handleKey] ?: ""
+        return handleToPath[handleKey]
     }
 
     private fun hashBytes(value: String): ByteArray {
@@ -682,11 +735,20 @@ class SpacesVfs(private val db: SpacesDatabase) : VirtualFileSystem {
         val newPath =
                 if (toRelative.isBlank()) root
                 else root.trimEnd('/') + "/" + toRelative.trimStart('/')
-        handleToPath.forEach { (handleKey, path) ->
+        handleToPath.forEach { (handleKey, entry) ->
+            val path = entry.path
             if (path == oldPath || path.startsWith("$oldPath/")) {
-                handleToPath[handleKey] = newPath + path.removePrefix(oldPath)
+                handleToPath[handleKey] =
+                        entry.copy(path = newPath + path.removePrefix(oldPath))
             }
         }
+    }
+
+    private fun isStaleOpenHandle(handle: OpenHandle): Boolean {
+        val mountId = handle.mountId ?: return false
+        val mountGeneration = handle.mountGeneration ?: return false
+        val currentGeneration = db.getUserMount(mountId)?.generation ?: return true
+        return mountGeneration != currentGeneration
     }
 
     private fun verifierFromEntries(entries: List<String>): ByteArray {
@@ -700,50 +762,62 @@ class SpacesVfs(private val db: SpacesDatabase) : VirtualFileSystem {
     }
 
     private fun resolveNode(inode: Inode): ResolvedNode {
-        val path = pathFor(inode)
-        if (!path.startsWith("/")) return ResolvedNode(NodeKind.UNKNOWN, path, null, null, "", "")
+        val entry = handleEntryFor(inode)
+        val path = entry?.path ?: ""
+        if (!path.startsWith("/")) return ResolvedNode(NodeKind.UNKNOWN, path, null, null, "", "", false)
         val relative = path.removePrefix("/").trimStart('/')
-        if (relative.isEmpty()) return ResolvedNode(NodeKind.EXPORT_ROOT, path, null, null, "", "/")
+        if (relative.isEmpty()) return ResolvedNode(NodeKind.EXPORT_ROOT, path, null, null, "", "/", false)
         val segments = relative.split('/').filter { it.isNotBlank() }.toMutableList()
-        if (segments.isEmpty()) return ResolvedNode(NodeKind.EXPORT_ROOT, path, null, null, "", "/")
+        if (segments.isEmpty()) return ResolvedNode(NodeKind.EXPORT_ROOT, path, null, null, "", "/", false)
         val top = segments[0]
+        if (top == "mounts" && segments.size >= 2 && isStaleMountHandle(segments[1], entry)) {
+            return ResolvedNode(
+                    NodeKind.UNKNOWN,
+                    path,
+                    null,
+                    segments[1],
+                    "",
+                    "/mounts/${segments[1]}",
+                    true
+            )
+        }
         return when (top) {
             "layers" -> resolveLayerPath(path, segments)
             "mounts" -> resolveMountPath(path, segments)
-            else -> ResolvedNode(NodeKind.UNKNOWN, path, null, null, "", "/")
+            else -> ResolvedNode(NodeKind.UNKNOWN, path, null, null, "", "/", false)
         }
     }
 
     private fun resolveLayerPath(fullPath: String, segments: List<String>): ResolvedNode {
         if (segments.size == 1)
-                return ResolvedNode(NodeKind.LAYERS_DIR, fullPath, null, null, "", "/")
+                return ResolvedNode(NodeKind.LAYERS_DIR, fullPath, null, null, "", "/", false)
         val layerId = segments[1]
         val mountPath = "/layers/$layerId"
         val mountView =
                 buildViewForLayer(layerId)
-                        ?: return ResolvedNode(NodeKind.UNKNOWN, fullPath, null, null, "", "/")
+                        ?: return ResolvedNode(NodeKind.UNKNOWN, fullPath, null, null, "", "/", false)
         return if (segments.size == 2) {
-            ResolvedNode(NodeKind.LAYER_ROOT, fullPath, mountView, layerId, "", mountPath)
+            ResolvedNode(NodeKind.LAYER_ROOT, fullPath, mountView, layerId, "", mountPath, false)
         } else {
             val rel = segments.drop(2).joinToString("/")
-            ResolvedNode(NodeKind.OVERLAY, fullPath, mountView, layerId, rel, mountPath)
+            ResolvedNode(NodeKind.OVERLAY, fullPath, mountView, layerId, rel, mountPath, false)
         }
     }
 
     private fun resolveMountPath(fullPath: String, segments: List<String>): ResolvedNode {
         if (segments.size == 1) {
-            return ResolvedNode(NodeKind.MOUNTS_DIR, fullPath, null, null, "", "/")
+            return ResolvedNode(NodeKind.MOUNTS_DIR, fullPath, null, null, "", "/", false)
         }
         val mountId = segments[1]
         val mountPath = "/mounts/$mountId"
         val mountView =
                 buildViewForUserMount(mountId)
-                        ?: return ResolvedNode(NodeKind.UNKNOWN, fullPath, null, null, "", "/")
+                        ?: return ResolvedNode(NodeKind.UNKNOWN, fullPath, null, null, "", "/", false)
         return if (segments.size == 2) {
-            ResolvedNode(NodeKind.MOUNT_ROOT, fullPath, mountView, mountId, "", mountPath)
+            ResolvedNode(NodeKind.MOUNT_ROOT, fullPath, mountView, mountId, "", mountPath, false)
         } else {
             val rel = segments.drop(2).joinToString("/")
-            ResolvedNode(NodeKind.OVERLAY, fullPath, mountView, mountId, rel, mountPath)
+            ResolvedNode(NodeKind.OVERLAY, fullPath, mountView, mountId, rel, mountPath, false)
         }
     }
 
@@ -759,7 +833,8 @@ class SpacesVfs(private val db: SpacesDatabase) : VirtualFileSystem {
         return MountView(
                 view = OverlayView(Paths.get(entrypoint.path), layers),
                 writable = true,
-                mountId = layerId
+                mountId = layerId,
+                mountGeneration = null
         )
     }
 
@@ -778,15 +853,23 @@ class SpacesVfs(private val db: SpacesDatabase) : VirtualFileSystem {
             return MountView(
                     view = OverlayView(Paths.get(entrypoint.path), layers),
                     writable = true,
-                    mountId = mountId
+                    mountId = mountId,
+                    mountGeneration = mount.generation
             )
         }
         val entrypoint = db.getEntrypoint(mount.entrypointId) ?: return null
         return MountView(
                 view = OverlayView(Paths.get(entrypoint.path), emptyList()),
                 writable = false,
-                mountId = mountId
+                mountId = mountId,
+                mountGeneration = mount.generation
         )
+    }
+
+    private fun isStaleMountHandle(mountId: String, entry: HandleEntry?): Boolean {
+        val handleGeneration = entry?.mountGeneration ?: return false
+        val currentGeneration = db.getUserMount(mountId)?.generation ?: return true
+        return handleGeneration != currentGeneration
     }
 
     private fun ensureWritable(mount: MountView) {
@@ -794,6 +877,7 @@ class SpacesVfs(private val db: SpacesDatabase) : VirtualFileSystem {
     }
 
     private fun requireKnown(node: ResolvedNode) {
+        if (node.stale) throw StaleException()
         if (node.kind == NodeKind.UNKNOWN) throw NoEntException()
     }
 
@@ -1400,9 +1484,25 @@ class SpacesVfs(private val db: SpacesDatabase) : VirtualFileSystem {
     // endregion
 }
 
-private data class OpenHandle(val channel: FileChannel, val path: Path)
+private data class HandleEntry(
+        val path: String,
+        val mountId: String? = null,
+        val mountGeneration: Long? = null
+)
 
-data class MountView(val view: OverlayView, val writable: Boolean, val mountId: String)
+private data class OpenHandle(
+        val channel: FileChannel,
+        val path: Path,
+        val mountId: String?,
+        val mountGeneration: Long?
+)
+
+data class MountView(
+        val view: OverlayView,
+        val writable: Boolean,
+        val mountId: String,
+        val mountGeneration: Long?
+)
 
 enum class NodeKind {
     EXPORT_ROOT,
@@ -1420,7 +1520,8 @@ data class ResolvedNode(
         val mountView: MountView?,
         val mountId: String?,
         val relativePath: String,
-        val mountPath: String
+        val mountPath: String,
+        val stale: Boolean
 )
 
 class SimpleIdMapping : NfsIdMapping {

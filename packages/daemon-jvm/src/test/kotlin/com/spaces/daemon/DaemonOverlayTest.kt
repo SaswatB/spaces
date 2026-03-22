@@ -151,7 +151,7 @@ private class TestEnv(root: Path) {
                         nfsHost = "127.0.0.1",
                         nfsPort = 11111
                 )
-        service = SpacesService(config, db, MountManager(config), replication)
+        service = SpacesService(config, db, MountManager(config), replication, vfs)
 
         insertEntrypoint("ep", entrypointRoot)
         insertLayer("parent", "ep", null)
@@ -238,6 +238,7 @@ private class TestEnv(root: Path) {
                         name = id,
                         entrypointId = entrypointId,
                         attachedLayerId = layerId,
+                        generation = 0,
                         upperDir = (root / "upper").toString(),
                         workDir = (root / "work").toString(),
                         mountPath = (dataDir / "mounts" / id).toString(),

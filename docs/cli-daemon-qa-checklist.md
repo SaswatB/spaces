@@ -43,6 +43,7 @@ High-value automated QA assertions include:
 - `mount attach` to same layer is a no-op for watcher signal and content.
 - `mount attach` switch updates watched content and path deltas (add/remove/rename).
 - a Vite dev server rooted at a fixed user mount path keeps serving from that path after a layer swap and returns the updated module content.
+- a writable file descriptor on a mounted user path fails stale write operations after a layer swap and succeeds after reopening the file from the same path.
 - parent-layer-chain attach switch updates effective content and should emit watcher signal.
 - detached -> attach switch updates content and should emit watcher signal.
 - deleting an inherited parent-layer path through a child-layer mount keeps it hidden in both the layer view and attached user mount.

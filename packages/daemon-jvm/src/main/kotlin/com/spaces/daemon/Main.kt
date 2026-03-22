@@ -29,7 +29,7 @@ fun main() {
     vfs.setOpHandler(replicationService::handleOp)
 
     val mountManager = MountManager(config)
-    val service = SpacesService(config, db, mountManager, replicationService)
+    val service = SpacesService(config, db, mountManager, replicationService, vfs)
     val nfsServer = NfsServer(config, db, vfs)
     nfsServer.start()
 

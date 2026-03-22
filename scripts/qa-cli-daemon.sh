@@ -819,6 +819,118 @@ run_vite_hot_swap_case() {
   rm -f "$vite_log"
 }
 
+run_open_fd_attach_case() {
+  name="$1"
+  mount_id="$2"
+  next_layer_id="$3"
+  mount_path="$4"
+  rel="$5"
+  initial_content="$6"
+  expected_reopened="$7"
+  ready_file="$(mktemp /tmp/spaces-qa-fd-ready.XXXXXX)"
+  trigger_file="$(mktemp /tmp/spaces-qa-fd-trigger.XXXXXX)"
+  result_file="$(mktemp /tmp/spaces-qa-fd-result.XXXXXX)"
+  rm -f "$ready_file" "$trigger_file" "$result_file"
+
+  set +e
+  baseline_code=1
+  wait_for_content "$mount_path/$rel" "$initial_content" "$WAIT_LONG_ATTEMPTS" && baseline_code=0
+
+  env -u NODE_OPTIONS node -e '
+const fs = require("fs");
+const path = process.argv[1];
+const readyFile = process.argv[2];
+const triggerFile = process.argv[3];
+const resultFile = process.argv[4];
+const expectedInitial = process.argv[5];
+const expectedReopened = process.argv[6];
+const sleep = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+const out = { initial: "", fstat: "not-run", write: "not-run", reopened: "", reopenedError: "", pass: false };
+let fd = -1;
+try {
+  fd = fs.openSync(path, "r+");
+  const initialBuffer = Buffer.alloc(128);
+  const initialRead = fs.readSync(fd, initialBuffer, 0, initialBuffer.length, 0);
+  out.initial = initialBuffer.toString("utf8", 0, initialRead);
+  fs.writeFileSync(readyFile, "ready");
+  for (let i = 0; i < 400; i += 1) {
+    if (fs.existsSync(triggerFile)) break;
+    sleep(10);
+  }
+  try {
+    fs.fstatSync(fd);
+    out.fstat = "ok";
+  } catch (error) {
+    out.fstat = error && error.code ? error.code : String(error);
+  }
+  try {
+    fs.writeSync(fd, Buffer.from("stale-write\n"), 0, "stale-write\n".length, 0);
+    out.write = "ok";
+  } catch (error) {
+    out.write = error && error.code ? error.code : String(error);
+  }
+  try {
+    out.reopened = fs.readFileSync(path, "utf8");
+  } catch (error) {
+    out.reopenedError = error && error.code ? error.code : String(error);
+  }
+  const staleCodes = new Set(["ESTALE", "EIO", "EBADF"]);
+  const staleObserved =
+    staleCodes.has(out.fstat) ||
+    staleCodes.has(out.write) ||
+    out.write.startsWith("E");
+  out.pass =
+    out.initial.trimEnd() === expectedInitial &&
+    staleObserved &&
+    out.reopened.trimEnd() === expectedReopened &&
+    out.reopenedError === "";
+} catch (error) {
+  out.setupError = error && error.code ? error.code : String(error);
+} finally {
+  if (fd >= 0) {
+    try { fs.closeSync(fd); } catch {}
+  }
+  fs.writeFileSync(resultFile, JSON.stringify(out));
+  process.exit(out.pass ? 0 : 1);
+}
+  ' "$mount_path/$rel" "$ready_file" "$trigger_file" "$result_file" "$initial_content" "$expected_reopened" >/tmp/spaces-qa-open-fd.err 2>&1 &
+  watcher_pid=$!
+
+  ready_code=1
+  wait_for_path_exists "$ready_file" "$WAIT_LONG_ATTEMPTS" && ready_code=0
+  attach_out="$(sh -lc "$CMD mount attach '$mount_id' '$next_layer_id' --json" 2>&1)"
+  attach_code=$?
+  : > "$trigger_file"
+  wait "$watcher_pid"
+  watcher_code=$?
+  result_json="$(cat "$result_file" 2>/dev/null || printf '{}')"
+  set -e
+
+  if [ "$baseline_code" -eq 0 ] &&
+    [ "$ready_code" -eq 0 ] &&
+    [ "$attach_code" -eq 0 ] &&
+    [ "$watcher_code" -eq 0 ]; then
+    printf "PASS | %s\n" "$name"
+    PASS=$((PASS + 1))
+  else
+    printf "FAIL | %s\n" "$name"
+    FAIL=$((FAIL + 1))
+  fi
+
+  printf "%s\n" "$attach_out" | sed -n '1,8p'
+  printf "%s\n" "$result_json" | env -u NODE_OPTIONS node -e '
+const fs = require("fs");
+const result = JSON.parse(fs.readFileSync(0, "utf8"));
+for (const key of ["initial", "fstat", "write", "reopened", "reopenedError", "setupError", "pass"]) {
+  if (Object.prototype.hasOwnProperty.call(result, key)) {
+    console.log(`${key}=${String(result[key]).replace(/\n/g, "\\n")}`);
+  }
+}
+  '
+  printf "\n"
+  rm -f "$ready_file" "$trigger_file" "$result_file" /tmp/spaces-qa-open-fd.err
+}
+
 run_case "daemon start" 0 sh -lc "$CMD daemon start"
 for _ in $(seq 1 40); do
   curl -sf "http://127.0.0.1:$API_PORT/system/health" >/dev/null 2>&1 && break
@@ -953,6 +1065,8 @@ if [ -n "$MOUNT_ID" ]; then
 
   if [ -n "$LAYER2_ID" ]; then
     run_hot_reload_switch_case "mount attach switch emits watcher event + content update" "$MOUNT_ID" "$LAYER2_ID" "$MOUNTDIR" "hot-switch.txt" "hot-switch.txt" "layer-two"
+    run_case "mount attach reset to layer1 for open-fd attach case" 0 sh -lc "$CMD mount attach '$MOUNT_ID' '$LAYER_ID' --json"
+    run_open_fd_attach_case "mount attach invalidates stale writable file descriptor and allows reopen" "$MOUNT_ID" "$LAYER2_ID" "$MOUNTDIR" "hot-switch.txt" "layer-one" "layer-two"
     run_case "mount attach reset to layer1 for vite dev-server case" 0 sh -lc "$CMD mount attach '$MOUNT_ID' '$LAYER_ID' --json"
     run_vite_hot_swap_case "vite dev server serves updated mounted content after layer hot swap" "$MOUNT_ID" "$LAYER2_ID" "$MOUNTDIR" "layer-one-vite" "layer-two-vite"
   fi

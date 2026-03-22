@@ -56,6 +56,7 @@ class SpacesDatabase(dbPath: String) {
                   name TEXT NOT NULL,
                   entrypoint_id TEXT NOT NULL REFERENCES entrypoints(id),
                   attached_layer_id TEXT REFERENCES layers(id),
+                  generation INTEGER NOT NULL DEFAULT 0,
                   upper_dir TEXT NOT NULL UNIQUE,
                   work_dir TEXT NOT NULL UNIQUE,
                   mount_path TEXT NOT NULL UNIQUE,
@@ -69,6 +70,7 @@ class SpacesDatabase(dbPath: String) {
             stmt.executeUpdate("CREATE INDEX IF NOT EXISTS idx_user_mounts_entrypoint ON user_mounts(entrypoint_id);")
             stmt.executeUpdate("CREATE INDEX IF NOT EXISTS idx_user_mounts_layer ON user_mounts(attached_layer_id);")
         }
+        ensureUserMountGenerationColumn()
     }
 
     fun listEntrypoints(): List<EntrypointRecord> = lock.withLock {
@@ -234,14 +236,14 @@ class SpacesDatabase(dbPath: String) {
     fun listUserMounts(entrypointId: String?): List<UserMountRecord> = lock.withLock {
         val sql = if (entrypointId != null) {
             """
-            SELECT id, name, entrypoint_id, attached_layer_id, upper_dir, work_dir, mount_path, created_at, updated_at
+            SELECT id, name, entrypoint_id, attached_layer_id, generation, upper_dir, work_dir, mount_path, created_at, updated_at
             FROM user_mounts
             WHERE entrypoint_id = ?
             ORDER BY created_at
             """.trimIndent()
         } else {
             """
-            SELECT id, name, entrypoint_id, attached_layer_id, upper_dir, work_dir, mount_path, created_at, updated_at
+            SELECT id, name, entrypoint_id, attached_layer_id, generation, upper_dir, work_dir, mount_path, created_at, updated_at
             FROM user_mounts
             ORDER BY created_at
             """.trimIndent()
@@ -263,7 +265,7 @@ class SpacesDatabase(dbPath: String) {
     fun listUserMountsByLayer(layerId: String): List<UserMountRecord> = lock.withLock {
         connection.prepareStatement(
             """
-            SELECT id, name, entrypoint_id, attached_layer_id, upper_dir, work_dir, mount_path, created_at, updated_at
+            SELECT id, name, entrypoint_id, attached_layer_id, generation, upper_dir, work_dir, mount_path, created_at, updated_at
             FROM user_mounts
             WHERE attached_layer_id = ?
             ORDER BY created_at
@@ -283,7 +285,7 @@ class SpacesDatabase(dbPath: String) {
     fun getUserMount(id: String): UserMountRecord? = lock.withLock {
         connection.prepareStatement(
             """
-            SELECT id, name, entrypoint_id, attached_layer_id, upper_dir, work_dir, mount_path, created_at, updated_at
+            SELECT id, name, entrypoint_id, attached_layer_id, generation, upper_dir, work_dir, mount_path, created_at, updated_at
             FROM user_mounts
             WHERE id = ?
             """.trimIndent()
@@ -298,19 +300,20 @@ class SpacesDatabase(dbPath: String) {
     fun insertUserMount(userMount: UserMountRecord) = lock.withLock {
         connection.prepareStatement(
             """
-            INSERT INTO user_mounts (id, name, entrypoint_id, attached_layer_id, upper_dir, work_dir, mount_path, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO user_mounts (id, name, entrypoint_id, attached_layer_id, generation, upper_dir, work_dir, mount_path, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """.trimIndent()
         ).use { stmt ->
             stmt.setString(1, userMount.id)
             stmt.setString(2, userMount.name)
             stmt.setString(3, userMount.entrypointId)
             stmt.setString(4, userMount.attachedLayerId)
-            stmt.setString(5, userMount.upperDir)
-            stmt.setString(6, userMount.workDir)
-            stmt.setString(7, userMount.mountPath)
-            stmt.setLong(8, userMount.createdAt)
-            stmt.setLong(9, userMount.updatedAt)
+            stmt.setLong(5, userMount.generation)
+            stmt.setString(6, userMount.upperDir)
+            stmt.setString(7, userMount.workDir)
+            stmt.setString(8, userMount.mountPath)
+            stmt.setLong(9, userMount.createdAt)
+            stmt.setLong(10, userMount.updatedAt)
             stmt.executeUpdate()
         }
     }
@@ -322,17 +325,18 @@ class SpacesDatabase(dbPath: String) {
         }
     }
 
-    fun updateUserMountLayer(id: String, layerId: String?, updatedAt: Long) = lock.withLock {
+    fun updateUserMountLayer(id: String, layerId: String?, generation: Long, updatedAt: Long) = lock.withLock {
         connection.prepareStatement(
             """
             UPDATE user_mounts
-            SET attached_layer_id = ?, updated_at = ?
+            SET attached_layer_id = ?, generation = ?, updated_at = ?
             WHERE id = ?
             """.trimIndent()
         ).use { stmt ->
             stmt.setString(1, layerId)
-            stmt.setLong(2, updatedAt)
-            stmt.setString(3, id)
+            stmt.setLong(2, generation)
+            stmt.setLong(3, updatedAt)
+            stmt.setString(4, id)
             stmt.executeUpdate()
         }
     }
@@ -386,12 +390,34 @@ class SpacesDatabase(dbPath: String) {
         name = getString("name"),
         entrypointId = getString("entrypoint_id"),
         attachedLayerId = getString("attached_layer_id"),
+        generation = getLong("generation"),
         upperDir = getString("upper_dir"),
         workDir = getString("work_dir"),
         mountPath = getString("mount_path"),
         createdAt = getLong("created_at"),
         updatedAt = getLong("updated_at")
     )
+
+    private fun ensureUserMountGenerationColumn() {
+        connection.prepareStatement("PRAGMA table_info(user_mounts)").use { stmt ->
+            stmt.executeQuery().use { rs ->
+                var hasGeneration = false
+                while (rs.next()) {
+                    if (rs.getString("name") == "generation") {
+                        hasGeneration = true
+                        break
+                    }
+                }
+                if (!hasGeneration) {
+                    connection.createStatement().use { alter ->
+                        alter.executeUpdate(
+                            "ALTER TABLE user_mounts ADD COLUMN generation INTEGER NOT NULL DEFAULT 0"
+                        )
+                    }
+                }
+            }
+        }
+    }
 }
 
 data class EntrypointRecord(
@@ -419,6 +445,7 @@ data class UserMountRecord(
     val name: String,
     val entrypointId: String,
     val attachedLayerId: String?,
+    val generation: Long,
     val upperDir: String,
     val workDir: String,
     val mountPath: String,

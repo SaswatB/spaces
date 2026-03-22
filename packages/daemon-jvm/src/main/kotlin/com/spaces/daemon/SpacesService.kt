@@ -10,7 +10,8 @@ class SpacesService(
         private val config: Config,
         private val db: SpacesDatabase,
         private val mountManager: MountManager,
-        private val replication: ReplicationService
+        private val replication: ReplicationService,
+        private val vfs: SpacesVfs
 ) {
     private val overlay = OverlayEngine()
 
@@ -165,6 +166,7 @@ class SpacesService(
                         name = name,
                         entrypointId = entrypointId,
                         attachedLayerId = attachedLayerId,
+                        generation = 0,
                         upperDir = upperDir,
                         workDir = workDir,
                         mountPath = mountPath,
@@ -202,13 +204,21 @@ class SpacesService(
             }
         }
         val now = nowSeconds()
-        db.updateUserMountLayer(userMountId, layerId, now)
+        val nextGeneration = if (oldLayerId == layerId) mount.generation else mount.generation + 1
+        if (oldLayerId != layerId) {
+            vfs.invalidateMountState(userMountId)
+            runCatching { unmountUserMount(mount) }
+        }
+        db.updateUserMountLayer(userMountId, layerId, nextGeneration, now)
         val updated = db.getUserMount(userMountId)
         if (layerId != null) {
             val layer = db.getLayer(layerId)
             if (layer != null) {
                 mountLayer(layer)
             }
+        }
+        if (updated != null && oldLayerId != layerId) {
+            mountUserMount(updated)
         }
         if (updated != null && oldLayerId != layerId) {
             replication.handleLayerSwitchInvalidation(updated.mountPath, oldLayerId, layerId)
