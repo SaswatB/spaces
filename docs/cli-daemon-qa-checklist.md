@@ -63,13 +63,15 @@ pnpm bench:cli-daemon
 
 This benchmark:
 - creates two layers with many files
-- measures a layer attach switch into a fixed user mount path
-- measures replay latency from a layer mount back into the attached user mount
+- measures attach request time and post-attach convergence time into a fixed user mount path
+- measures replay write time and replay convergence lag from a layer mount back into one or more attached user mounts
+- supports multiple scale points in one run
 - prints timing output in milliseconds
 
 Useful env vars:
 - `SPACES_BENCH_BUILD_ARTIFACTS=0` to reuse existing release artifacts
-- `SPACES_BENCH_FILE_COUNT=<n>` to scale the tree size
+- `SPACES_BENCH_FILE_COUNTS=20,100,500` to run multiple tree sizes
+- `SPACES_BENCH_FANOUT_MOUNTS=<n>` to replay into multiple fixed user mount paths
 
 ## Manual Smoke Sequence
 

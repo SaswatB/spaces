@@ -84,6 +84,12 @@ fun main() {
                     get("/system/health") { call.respond(HealthResponse("ok")) }
                     get("/system/config") { call.respond(config) }
                     get("/system/status") { call.respond(service.status()) }
+                    get("/system/perf") { call.respond(PerfStats.snapshot()) }
+                    get("/system/replication-idle") { call.respond(replicationService.idleSnapshot()) }
+                    post("/system/perf/reset") {
+                        PerfStats.reset()
+                        call.respond(HttpStatusCode.OK, SuccessResponse())
+                    }
                     post("/system/remount") {
                         service.remountAll()
                         call.respond(HttpStatusCode.OK, SuccessResponse())

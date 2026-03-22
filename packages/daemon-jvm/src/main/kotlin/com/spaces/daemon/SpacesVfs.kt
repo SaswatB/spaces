@@ -974,35 +974,50 @@ class SpacesVfs(private val db: SpacesDatabase) : VirtualFileSystem {
     // region: Layer switch invalidation
 
     fun invalidateMountForLayerSwitch(mountPath: String, oldLayerId: String?, newLayerId: String?) {
-        val mountRoot = Paths.get(mountPath)
-        if (!Files.exists(mountRoot)) return
+        PerfStats.timed("layer_switch.invalidate.total") {
+            val mountRoot = Paths.get(mountPath)
+            if (!Files.exists(mountRoot)) return@timed
 
-        val oldFingerprints = dirtyFingerprintsForLayer(oldLayerId)
-        val newFingerprints = dirtyFingerprintsForLayer(newLayerId)
-        val changed = mutableListOf<String>()
-        for (path in oldFingerprints.keys + newFingerprints.keys) {
-            if (oldFingerprints[path] != newFingerprints[path]) {
-                changed.add(path)
+            val oldFingerprints =
+                    PerfStats.timed("layer_switch.invalidate.old_fingerprints") {
+                        dirtyFingerprintsForLayer(oldLayerId)
+                    }
+            val newFingerprints =
+                    PerfStats.timed("layer_switch.invalidate.new_fingerprints") {
+                        dirtyFingerprintsForLayer(newLayerId)
+                    }
+            val changed =
+                    PerfStats.timed("layer_switch.invalidate.diff") {
+                        val changedPaths = mutableListOf<String>()
+                        for (path in oldFingerprints.keys + newFingerprints.keys) {
+                            if (oldFingerprints[path] != newFingerprints[path]) {
+                                changedPaths.add(path)
+                            }
+                        }
+                        changedPaths
+                    }
+
+            if (changed.isNotEmpty()) {
+                // Avoid touching real files through NFS here: setattr can copy-up and pin old content
+                // into the user-mount upper, which breaks attach semantics. Emit a transient pulse
+                // event at mount root to wake recursive watchers without mutating user content.
+                PerfStats.timed("layer_switch.invalidate.emit_pulse") {
+                    emitSwitchPulseEvent(mountRoot)
+                }
             }
         }
-
-        if (changed.isNotEmpty()) {
-            // Avoid touching real files through NFS here: setattr can copy-up and pin old content
-            // into the user-mount upper, which breaks attach semantics. Emit a transient pulse
-            // event at mount root to wake recursive watchers without mutating user content.
-            emitSwitchPulseEvent(mountRoot)
-        }
-
     }
 
     private fun dirtyFingerprintsForLayer(layerId: String?): Map<String, String> {
         if (layerId == null) return emptyMap()
         val mountView = buildViewForLayer(layerId) ?: return emptyMap()
-        val dirtyPaths = dirtyPathsForLayer(layerId)
+        val dirtyPaths = PerfStats.timed("layer_switch.dirty_paths_for_layer") { dirtyPathsForLayer(layerId) }
         val result = mutableMapOf<String, String>()
         for (relative in dirtyPaths) {
             if (relative.isBlank()) continue
-            result[relative] = fingerprintPath(mountView.view, relative)
+            result[relative] = PerfStats.timed("layer_switch.fingerprint_path") {
+                fingerprintPath(mountView.view, relative)
+            }
         }
         return result
     }
@@ -1111,39 +1126,49 @@ class SpacesVfs(private val db: SpacesDatabase) : VirtualFileSystem {
     // region: Replay
 
     fun replay(sourceMountId: String, targetMountId: String, op: NfsOp) {
-        // Source is resolved through the in-process overlay model so replay reads never traverse
-        // exported NFS mount paths (avoids self-reentrant NFS reads during replication).
-        val sourceMount = buildMountViewById(sourceMountId) ?: return
-        // A user mount can observe files from its attached layer as lower content.
-        // Replaying such observed lower paths back into that same attached layer is an echo that
-        // creates replay loops and noisy failures (same-file/same-target copies).
-        if (shouldSkipReplayEchoToAttachedLayer(sourceMountId, targetMountId, sourceMount, op)) {
-            return
-        }
-        // Target writes intentionally go through the target mount path to surface real filesystem
-        // change notifications for external watchers (dev servers, hot-reload tooling).
-        val targetRoot = mountPathForId(targetMountId) ?: return
-        if (shouldPulseInsteadOfReplay(sourceMountId, targetMountId, op)) {
-            emitSwitchPulseEvent(Paths.get(targetRoot))
-            return
-        }
-
-        when (op.kind) {
-            NfsOpKind.Remove, NfsOpKind.Rmdir ->
-                    replayDelete(Paths.get(targetRoot), op.relativePath)
-            NfsOpKind.Rename -> {
-                val toRelative = op.targetRelativePath ?: return
-                val sourcePath = overlay.resolvePath(sourceMount.view, toRelative)?.source
-                replayRename(
-                        sourceMount,
-                        sourcePath,
-                        Paths.get(targetRoot),
-                        op.relativePath,
-                        toRelative
-                )
+        PerfStats.timed("replay.total") {
+            // Source is resolved through the in-process overlay model so replay reads never traverse
+            // exported NFS mount paths (avoids self-reentrant NFS reads during replication).
+            val sourceMount = buildMountViewById(sourceMountId) ?: return@timed
+            // A user mount can observe files from its attached layer as lower content.
+            // Replaying such observed lower paths back into that same attached layer is an echo that
+            // creates replay loops and noisy failures (same-file/same-target copies).
+            if (shouldSkipReplayEchoToAttachedLayer(sourceMountId, targetMountId, sourceMount, op)) {
+                return@timed
             }
-            NfsOpKind.Create, NfsOpKind.Write, NfsOpKind.Mkdir, NfsOpKind.Setattr ->
-                    replayUpsert(sourceMount, Paths.get(targetRoot), op.relativePath)
+            // Target writes intentionally go through the target mount path to surface real filesystem
+            // change notifications for external watchers (dev servers, hot-reload tooling).
+            val targetRoot = mountPathForId(targetMountId) ?: return@timed
+            if (shouldPulseInsteadOfReplay(sourceMountId, targetMountId, op)) {
+                PerfStats.timed("replay.emit_pulse") {
+                    emitSwitchPulseEvent(Paths.get(targetRoot))
+                }
+                return@timed
+            }
+
+            when (op.kind) {
+                NfsOpKind.Remove, NfsOpKind.Rmdir ->
+                        PerfStats.timed("replay.delete") {
+                            replayDelete(Paths.get(targetRoot), op.relativePath)
+                        }
+                NfsOpKind.Rename -> {
+                    val toRelative = op.targetRelativePath ?: return@timed
+                    val sourcePath = overlay.resolvePath(sourceMount.view, toRelative)?.source
+                    PerfStats.timed("replay.rename") {
+                        replayRename(
+                                sourceMount,
+                                sourcePath,
+                                Paths.get(targetRoot),
+                                op.relativePath,
+                                toRelative
+                        )
+                    }
+                }
+                NfsOpKind.Create, NfsOpKind.Write, NfsOpKind.Mkdir, NfsOpKind.Setattr ->
+                        PerfStats.timed("replay.upsert") {
+                            replayUpsert(sourceMount, Paths.get(targetRoot), op.relativePath)
+                        }
+            }
         }
     }
 
@@ -1242,37 +1267,39 @@ class SpacesVfs(private val db: SpacesDatabase) : VirtualFileSystem {
     }
 
     private fun replayDirectoryView(sourceMount: MountView, targetRoot: Path, relative: String) {
-        // Enumerate the directory through overlay view semantics, not a single concrete dir.
-        // This preserves parent/lower visibility when the top upper is only a partial delta.
-        val targetDir = targetRoot.resolve(relative)
-        if (Files.exists(targetDir) && !Files.isDirectory(targetDir)) {
-            deletePath(targetDir)
-        }
-        Files.createDirectories(targetDir)
-        val visibleEntries =
-                overlay.listDir(sourceMount.view, relative).filterNot(::isIgnoredInvalidationName)
-        val visibleNames = visibleEntries.toSet()
-        if (Files.exists(targetDir)) {
-            Files.newDirectoryStream(targetDir).use { stream ->
-                for (entry in stream) {
-                    val name = entry.fileName.toString()
-                    if (isIgnoredInvalidationName(name)) continue
-                    if (!visibleNames.contains(name)) {
-                        deletePath(entry)
+        PerfStats.timed("replay.directory_view") {
+            // Enumerate the directory through overlay view semantics, not a single concrete dir.
+            // This preserves parent/lower visibility when the top upper is only a partial delta.
+            val targetDir = targetRoot.resolve(relative)
+            if (Files.exists(targetDir) && !Files.isDirectory(targetDir)) {
+                deletePath(targetDir)
+            }
+            Files.createDirectories(targetDir)
+            val visibleEntries =
+                    overlay.listDir(sourceMount.view, relative).filterNot(::isIgnoredInvalidationName)
+            val visibleNames = visibleEntries.toSet()
+            if (Files.exists(targetDir)) {
+                Files.newDirectoryStream(targetDir).use { stream ->
+                    for (entry in stream) {
+                        val name = entry.fileName.toString()
+                        if (isIgnoredInvalidationName(name)) continue
+                        if (!visibleNames.contains(name)) {
+                            deletePath(entry)
+                        }
                     }
                 }
             }
-        }
-        for (name in visibleEntries) {
-            if (isIgnoredInvalidationName(name)) continue
-            val childRelative = if (relative.isBlank()) name else "$relative/$name"
-            val childSource =
-                    overlay.resolvePath(sourceMount.view, childRelative)?.source ?: continue
-            val childTarget = targetRoot.resolve(childRelative)
-            if (Files.isDirectory(childSource)) {
-                replayDirectoryView(sourceMount, targetRoot, childRelative)
-            } else {
-                syncLeaf(childSource, childTarget)
+            for (name in visibleEntries) {
+                if (isIgnoredInvalidationName(name)) continue
+                val childRelative = if (relative.isBlank()) name else "$relative/$name"
+                val childSource =
+                        overlay.resolvePath(sourceMount.view, childRelative)?.source ?: continue
+                val childTarget = targetRoot.resolve(childRelative)
+                if (Files.isDirectory(childSource)) {
+                    replayDirectoryView(sourceMount, targetRoot, childRelative)
+                } else {
+                    syncLeaf(childSource, childTarget)
+                }
             }
         }
     }
@@ -1298,16 +1325,18 @@ class SpacesVfs(private val db: SpacesDatabase) : VirtualFileSystem {
         ) {
             return
         }
-        val parent = target.parent
-        if (parent != null) {
-            Files.createDirectories(parent)
+        PerfStats.timed("replay.copy_file") {
+            val parent = target.parent
+            if (parent != null) {
+                Files.createDirectories(parent)
+            }
+            Files.copy(
+                    source,
+                    target,
+                    StandardCopyOption.REPLACE_EXISTING,
+                    StandardCopyOption.COPY_ATTRIBUTES
+            )
         }
-        Files.copy(
-                source,
-                target,
-                StandardCopyOption.REPLACE_EXISTING,
-                StandardCopyOption.COPY_ATTRIBUTES
-        )
     }
 
     private fun isUnchangedRegularFile(source: Path, target: Path): Boolean {

@@ -4,6 +4,8 @@ import java.time.Duration
 import java.time.Instant
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicInteger
+import kotlinx.serialization.Serializable
 import org.slf4j.LoggerFactory
 
 data class NfsOp(
@@ -49,8 +51,13 @@ class ReplicationService(
         private val vfs: SpacesVfs
 ) {
     private val logger = LoggerFactory.getLogger(ReplicationService::class.java)
-    private val replayDispatch = Executors.newSingleThreadExecutor()
-    private val invalidationDispatch = Executors.newSingleThreadExecutor()
+    private val serialReplayDispatch = Executors.newSingleThreadExecutor()
+    private val serialInvalidationDispatch = Executors.newSingleThreadExecutor()
+    private val idleWaitTimeoutMs =
+            (System.getenv("SPACES_REPLICATION_IDLE_WAIT_TIMEOUT_MS") ?: "10000").toLong()
+    private val pendingReplayTasks = AtomicInteger(0)
+    private val pendingInvalidationTasks = AtomicInteger(0)
+    private val pendingInvalidationByMount = ConcurrentHashMap<String, AtomicInteger>()
 
     fun handleOp(op: NfsOp) {
         if (isReplicationIgnoredOp(op)) {
@@ -66,39 +73,91 @@ class ReplicationService(
             if (targetMountId == op.mountId) continue
             val targetKey = suppressionKey(op.copy(mountId = targetMountId))
             engine.suppress(targetKey)
+            val queuedAt = System.nanoTime()
+            pendingReplayTasks.incrementAndGet()
             // Dispatch replay off the serving NFS thread.
             // Replay can touch mount paths to generate watcher-visible fs events, and we do not
             // want that I/O to synchronously re-enter NFS handling for the current request.
-            replayDispatch.execute {
-                runCatching { vfs.replay(op.mountId, targetMountId, op) }
-                        .onFailure { error ->
-                            logger.warn(
-                                    "Replay failed sourceMountId={} targetMountId={} opKind={} path={} targetPath={}",
-                                    op.mountId,
-                                    targetMountId,
-                                    op.kind,
-                                    op.relativePath,
-                                    op.targetRelativePath,
-                                    error
-                            )
-                        }
+            serialReplayDispatch.execute {
+                try {
+                    PerfStats.observe("replication.replay.queue_delay", System.nanoTime() - queuedAt)
+                    val runStart = System.nanoTime()
+                    runCatching { vfs.replay(op.mountId, targetMountId, op) }
+                            .onFailure { error ->
+                                logger.warn(
+                                        "Replay failed sourceMountId={} targetMountId={} opKind={} path={} targetPath={}",
+                                        op.mountId,
+                                        targetMountId,
+                                        op.kind,
+                                        op.relativePath,
+                                        op.targetRelativePath,
+                                        error
+                                )
+                            }
+                    PerfStats.observe("replication.replay.task", System.nanoTime() - runStart)
+                } finally {
+                    pendingReplayTasks.decrementAndGet()
+                }
             }
         }
     }
 
     fun handleLayerSwitchInvalidation(mountPath: String, oldLayerId: String?, newLayerId: String?) {
-        invalidationDispatch.execute {
-            runCatching { vfs.invalidateMountForLayerSwitch(mountPath, oldLayerId, newLayerId) }
-                    .onFailure { error ->
-                        logger.warn(
-                                "Layer-switch invalidation failed mountPath={} oldLayerId={} newLayerId={}",
-                                mountPath,
-                                oldLayerId,
-                                newLayerId,
-                                error
-                        )
-                    }
+        val queuedAt = System.nanoTime()
+        pendingInvalidationTasks.incrementAndGet()
+        pendingInvalidationForMount(mountPath).incrementAndGet()
+        serialInvalidationDispatch.execute {
+            try {
+                PerfStats.observe("replication.invalidation.queue_delay", System.nanoTime() - queuedAt)
+                val runStart = System.nanoTime()
+                runCatching { vfs.invalidateMountForLayerSwitch(mountPath, oldLayerId, newLayerId) }
+                        .onFailure { error ->
+                            logger.warn(
+                                    "Layer-switch invalidation failed mountPath={} oldLayerId={} newLayerId={}",
+                                    mountPath,
+                                    oldLayerId,
+                                    newLayerId,
+                                    error
+                            )
+                        }
+                PerfStats.observe("replication.invalidation.task", System.nanoTime() - runStart)
+            } finally {
+                pendingInvalidationTasks.decrementAndGet()
+                pendingInvalidationForMount(mountPath).decrementAndGet()
+            }
         }
+    }
+
+    fun idleSnapshot(): ReplicationIdleSnapshot {
+        val replay = pendingReplayTasks.get()
+        val invalidation = pendingInvalidationTasks.get()
+        return ReplicationIdleSnapshot(
+                replayPending = replay,
+                invalidationPending = invalidation,
+                idle = replay == 0 && invalidation == 0
+        )
+    }
+
+    fun awaitIdle(timeoutMs: Long = idleWaitTimeoutMs): Boolean {
+        val deadline = System.nanoTime() + timeoutMs * 1_000_000
+        while (System.nanoTime() < deadline) {
+            if (idleSnapshot().idle) {
+                return true
+            }
+            Thread.sleep(10)
+        }
+        return idleSnapshot().idle
+    }
+
+    fun awaitMountInvalidation(mountPath: String, timeoutMs: Long = idleWaitTimeoutMs): Boolean {
+        val deadline = System.nanoTime() + timeoutMs * 1_000_000
+        while (System.nanoTime() < deadline) {
+            if ((pendingInvalidationByMount[mountPath]?.get() ?: 0) == 0) {
+                return true
+            }
+            Thread.sleep(10)
+        }
+        return (pendingInvalidationByMount[mountPath]?.get() ?: 0) == 0
     }
 
     private fun resolveLayerId(mountId: String): String? {
@@ -120,6 +179,10 @@ class ReplicationService(
             targets.add(mount.id)
         }
         return targets
+    }
+
+    private fun pendingInvalidationForMount(mountPath: String): AtomicInteger {
+        return pendingInvalidationByMount.computeIfAbsent(mountPath) { AtomicInteger(0) }
     }
 
     private fun suppressionKey(op: NfsOp): String {
@@ -144,3 +207,10 @@ class ReplicationService(
         }
     }
 }
+
+@Serializable
+data class ReplicationIdleSnapshot(
+        val replayPending: Int,
+        val invalidationPending: Int,
+        val idle: Boolean
+)

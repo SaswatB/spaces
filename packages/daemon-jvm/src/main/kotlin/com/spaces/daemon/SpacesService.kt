@@ -212,6 +212,9 @@ class SpacesService(
         }
         if (updated != null && oldLayerId != layerId) {
             replication.handleLayerSwitchInvalidation(updated.mountPath, oldLayerId, layerId)
+            if (!replication.awaitMountInvalidation(updated.mountPath)) {
+                throw IllegalStateException("Timed out waiting for mount attach invalidation to settle")
+            }
         }
     }
 

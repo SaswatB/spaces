@@ -6,20 +6,21 @@ cd "$ROOT_DIR"
 
 VERSION="${SPACES_VERSION:-0.1.0}"
 BUILD_ARTIFACTS="${SPACES_BENCH_BUILD_ARTIFACTS:-1}"
-FILE_COUNT="${SPACES_BENCH_FILE_COUNT:-300}"
+FILE_COUNTS="${SPACES_BENCH_FILE_COUNTS:-${SPACES_BENCH_FILE_COUNT:-40}}"
+FANOUT_MOUNTS="${SPACES_BENCH_FANOUT_MOUNTS:-3}"
 API_PORT="${SPACES_BENCH_API_PORT:-$((36000 + ($$ % 1000)))}"
 NFS_PORT="${SPACES_BENCH_NFS_PORT:-$((15000 + ($$ % 1000)))}"
 WAIT_STEP_SECONDS="${SPACES_BENCH_WAIT_STEP_SECONDS:-0.05}"
 WAIT_ATTEMPTS="${SPACES_BENCH_WAIT_ATTEMPTS:-400}"
 WORK_ROOT="$(mktemp -d /tmp/spaces-bench-script.XXXXXX)"
-ENTRY="$WORK_ROOT/entry"
-MOUNTDIR="$WORK_ROOT/mount"
 STATE="$WORK_ROOT/state"
 DATA="$WORK_ROOT/data"
 DBDIR="$WORK_ROOT/db"
 RUNTIME_ROOT="$WORK_ROOT/runtime"
+ENTRY_ROOT="$WORK_ROOT/entries"
+MOUNT_ROOT="$WORK_ROOT/mounts"
 
-mkdir -p "$ENTRY" "$MOUNTDIR" "$STATE" "$DATA" "$DBDIR" "$RUNTIME_ROOT"
+mkdir -p "$STATE" "$DATA" "$DBDIR" "$RUNTIME_ROOT" "$ENTRY_ROOT" "$MOUNT_ROOT"
 
 ps aux | awk '/spacesd-runtime\/bin\/java/ && /\/tmp\/spaces-bench-script\./ {print $2}' | xargs -I{} kill -9 {} 2>/dev/null || true
 mount \
@@ -53,6 +54,7 @@ export SPACES_NFS_PORT="$NFS_PORT"
 export SPACES_API_TIMEOUT_MS="${SPACES_BENCH_API_TIMEOUT_MS:-8000}"
 
 CMD="env -u NODE_OPTIONS pnpm --filter @spaces/web exec tsx bin/spaces.ts"
+export SPACES_PERF_TRACE="${SPACES_PERF_TRACE:-1}"
 
 cleanup() {
   sh -lc "$CMD daemon stop" >/dev/null 2>&1 || true
@@ -63,6 +65,51 @@ trap cleanup EXIT INT TERM
 json_field() {
   field="$1"
   env -u NODE_OPTIONS node -e 'const fs=require("fs");const field=process.argv[1];const data=JSON.parse(fs.readFileSync(0,"utf8"));process.stdout.write(String(data[field] || ""))' "$field"
+}
+
+ms_now() {
+  env -u NODE_OPTIONS node -e 'process.stdout.write(String(Date.now()))'
+}
+
+perf_reset() {
+  curl -sf -X POST "http://127.0.0.1:$API_PORT/system/perf/reset" >/dev/null
+}
+
+wait_for_replication_idle() {
+  for _ in $(seq 1 "$WAIT_ATTEMPTS"); do
+    body="$(curl -sf "http://127.0.0.1:$API_PORT/system/replication-idle" 2>/dev/null || true)"
+    if [ -n "$body" ] && printf "%s" "$body" \
+      | env -u NODE_OPTIONS node -e '
+const fs = require("fs");
+const body = JSON.parse(fs.readFileSync(0, "utf8"));
+process.exit(body.idle ? 0 : 1);
+'; then
+      return 0
+    fi
+    sleep "$WAIT_STEP_SECONDS"
+  done
+  return 1
+}
+
+perf_summary() {
+  label="$1"
+  phase="$2"
+  file_count="$3"
+  curl -sf "http://127.0.0.1:$API_PORT/system/perf" \
+    | env -u NODE_OPTIONS node -e '
+const fs = require("fs");
+const label = process.argv[1];
+const phase = process.argv[2];
+const fileCount = process.argv[3];
+const metrics = JSON.parse(fs.readFileSync(0, "utf8"));
+const top = metrics
+  .sort((a, b) => b.totalMs - a.totalMs)
+  .slice(0, 8)
+  .map((metric) => `${metric.name}:${metric.totalMs.toFixed(1)}ms/${metric.count}x(max=${metric.maxMs.toFixed(1)}ms)`)
+  .join(", ");
+process.stdout.write(`PERF label=${label} file_count=${fileCount} phase=${phase} top=[${top}]`);
+' "$label" "$phase" "$file_count"
+  printf "\n"
 }
 
 wait_for_content() {
@@ -88,16 +135,122 @@ wait_for_path_exists() {
   return 1
 }
 
-ms_now() {
-  env -u NODE_OPTIONS node -e 'process.stdout.write(String(Date.now()))'
+wait_for_mounts_content() {
+  rel="$1"
+  expected="$2"
+  shift 2
+  for mount_path in "$@"; do
+    wait_for_content "$mount_path/$rel" "$expected"
+  done
 }
 
-printf "Preparing %s files per layer...\n" "$FILE_COUNT"
-for i in $(seq 1 "$FILE_COUNT"); do
-  printf "entry-%s\n" "$i" > "$ENTRY/file-$i.txt"
-done
-mkdir -p "$ENTRY/nested/deep"
-printf "entry-bench\n" > "$ENTRY/nested/deep/marker.txt"
+benchmark_case() {
+  file_count="$1"
+  case_root="$WORK_ROOT/case-$file_count"
+  entry="$case_root/entry"
+  mount_root="$case_root/mounts"
+  mount_ids=""
+  mount_paths=""
+
+  mkdir -p "$entry" "$mount_root"
+
+  printf "Preparing %s files per layer...\n" "$file_count"
+  for i in $(seq 1 "$file_count"); do
+    printf "entry-%s\n" "$i" > "$entry/file-$i.txt"
+  done
+  mkdir -p "$entry/nested/deep"
+  printf "entry-bench\n" > "$entry/nested/deep/marker.txt"
+
+  ep_json="$(sh -lc "$CMD entrypoint create --path '$entry' --name 'bench-entry-$file_count' --json")"
+  ep_id="$(printf "%s" "$ep_json" | json_field id)"
+  l1_json="$(sh -lc "$CMD layer create --entrypoint '$ep_id' --name 'bench-layer-a-$file_count' --json")"
+  l2_json="$(sh -lc "$CMD layer create --entrypoint '$ep_id' --name 'bench-layer-b-$file_count' --json")"
+  l1_id="$(printf "%s" "$l1_json" | json_field id)"
+  l2_id="$(printf "%s" "$l2_json" | json_field id)"
+  l1_upper="$(printf "%s" "$l1_json" | json_field upperDir)"
+  l2_upper="$(printf "%s" "$l2_json" | json_field upperDir)"
+  l2_mount="$(printf "%s" "$l2_json" | json_field mountPath)"
+
+  for i in $(seq 1 "$file_count"); do
+    printf "layer-a-%s\n" "$i" > "$l1_upper/file-$i.txt"
+    printf "layer-b-%s\n" "$i" > "$l2_upper/file-$i.txt"
+  done
+  mkdir -p "$l1_upper/nested/deep" "$l2_upper/nested/deep"
+  printf "layer-a-marker\n" > "$l1_upper/nested/deep/marker.txt"
+  printf "layer-b-marker\n" > "$l2_upper/nested/deep/marker.txt"
+
+  mount_index=1
+  while [ "$mount_index" -le "$FANOUT_MOUNTS" ]; do
+    mount_path="$mount_root/mount-$mount_index"
+    mkdir -p "$mount_path"
+    mount_json="$(sh -lc "$CMD mount create --name 'bench-mount-$file_count-$mount_index' --mount-path '$mount_path' --entrypoint '$ep_id' --layer '$l1_id' --json")"
+    mount_id="$(printf "%s" "$mount_json" | json_field id)"
+    if [ -n "$mount_ids" ]; then
+      mount_ids="$mount_ids $mount_id"
+      mount_paths="$mount_paths $mount_path"
+    else
+      mount_ids="$mount_id"
+      mount_paths="$mount_path"
+    fi
+    mount_index=$((mount_index + 1))
+  done
+
+  set -- $mount_ids
+  primary_mount_id="$1"
+  set -- $mount_paths
+  primary_mount_path="$1"
+
+  printf "Benchmarking attach switch across %s files to %s mount(s)...\n" "$file_count" "$FANOUT_MOUNTS"
+  wait_for_replication_idle
+  perf_reset
+  attach_request_start="$(ms_now)"
+  sh -lc "$CMD mount attach '$primary_mount_id' '$l2_id' --json" >/dev/null
+  attach_request_end="$(ms_now)"
+  wait_for_content "$primary_mount_path/file-$file_count.txt" "layer-b-$file_count"
+  wait_for_content "$primary_mount_path/nested/deep/marker.txt" "layer-b-marker"
+  wait_for_replication_idle
+  attach_visible_end="$(ms_now)"
+  attach_request_ms=$((attach_request_end - attach_request_start))
+  attach_converge_ms=$((attach_visible_end - attach_request_end))
+  attach_total_ms=$((attach_visible_end - attach_request_start))
+  perf_summary "attach" "after_attach" "$file_count"
+
+  printf "Benchmarking replay fanout from layer mount into %s fixed user mount(s)...\n" "$FANOUT_MOUNTS"
+  set -- $mount_ids
+  for mount_id in "$@"; do
+    sh -lc "$CMD mount attach '$mount_id' '$l2_id' --json" >/dev/null
+  done
+  set -- $mount_paths
+  wait_for_mounts_content "file-$file_count.txt" "layer-b-$file_count" "$@"
+  sh -lc "$CMD layer mount '$l2_id' --json" >/dev/null
+  wait_for_path_exists "$l2_mount"
+
+  wait_for_replication_idle
+  perf_reset
+  replay_write_start="$(ms_now)"
+  for i in $(seq 1 "$file_count"); do
+    printf "replay-%s\n" "$i" > "$l2_mount/replay-$i.txt"
+  done
+  replay_write_end="$(ms_now)"
+  set -- $mount_paths
+  wait_for_mounts_content "replay-$file_count.txt" "replay-$file_count" "$@"
+  wait_for_replication_idle
+  replay_visible_end="$(ms_now)"
+  replay_write_ms=$((replay_write_end - replay_write_start))
+  replay_converge_ms=$((replay_visible_end - replay_write_end))
+  replay_total_ms=$((replay_visible_end - replay_write_start))
+  perf_summary "replay" "after_replay" "$file_count"
+
+  printf "RESULT file_count=%s fanout_mounts=%s attach_request_ms=%s attach_converge_ms=%s attach_total_ms=%s replay_write_ms=%s replay_converge_ms=%s replay_total_ms=%s\n" \
+    "$file_count" \
+    "$FANOUT_MOUNTS" \
+    "$attach_request_ms" \
+    "$attach_converge_ms" \
+    "$attach_total_ms" \
+    "$replay_write_ms" \
+    "$replay_converge_ms" \
+    "$replay_total_ms"
+}
 
 printf "Starting daemon...\n"
 sh -lc "$CMD daemon start" >/dev/null
@@ -106,44 +259,13 @@ for _ in $(seq 1 40); do
   sleep 0.2
 done
 
-EP_JSON="$(sh -lc "$CMD entrypoint create --path '$ENTRY' --name bench-entry --json")"
-EP_ID="$(printf "%s" "$EP_JSON" | json_field id)"
-L1_JSON="$(sh -lc "$CMD layer create --entrypoint '$EP_ID' --name bench-layer-a --json")"
-L2_JSON="$(sh -lc "$CMD layer create --entrypoint '$EP_ID' --name bench-layer-b --json")"
-L1_ID="$(printf "%s" "$L1_JSON" | json_field id)"
-L2_ID="$(printf "%s" "$L2_JSON" | json_field id)"
-L1_UPPER="$(printf "%s" "$L1_JSON" | json_field upperDir)"
-L2_UPPER="$(printf "%s" "$L2_JSON" | json_field upperDir)"
-L2_MOUNT="$(printf "%s" "$L2_JSON" | json_field mountPath)"
-
-for i in $(seq 1 "$FILE_COUNT"); do
-  printf "layer-a-%s\n" "$i" > "$L1_UPPER/file-$i.txt"
-  printf "layer-b-%s\n" "$i" > "$L2_UPPER/file-$i.txt"
+OLD_IFS="${IFS}"
+IFS=','
+for raw_count in $FILE_COUNTS; do
+  IFS="${OLD_IFS}"
+  file_count="$(printf "%s" "$raw_count" | tr -d '[:space:]')"
+  [ -n "$file_count" ] || continue
+  benchmark_case "$file_count"
+  IFS=','
 done
-mkdir -p "$L1_UPPER/nested/deep" "$L2_UPPER/nested/deep"
-printf "layer-a-marker\n" > "$L1_UPPER/nested/deep/marker.txt"
-printf "layer-b-marker\n" > "$L2_UPPER/nested/deep/marker.txt"
-
-MOUNT_JSON="$(sh -lc "$CMD mount create --name bench-mount --mount-path '$MOUNTDIR' --entrypoint '$EP_ID' --layer '$L1_ID' --json")"
-MOUNT_ID="$(printf "%s" "$MOUNT_JSON" | json_field id)"
-
-printf "Benchmarking attach switch across %s files...\n" "$FILE_COUNT"
-attach_start="$(ms_now)"
-sh -lc "$CMD mount attach '$MOUNT_ID' '$L2_ID' --json" >/dev/null
-wait_for_content "$MOUNTDIR/file-$FILE_COUNT.txt" "layer-b-$FILE_COUNT"
-wait_for_content "$MOUNTDIR/nested/deep/marker.txt" "layer-b-marker"
-attach_end="$(ms_now)"
-attach_ms=$((attach_end - attach_start))
-
-printf "Benchmarking replay from layer mount into fixed user mount path...\n"
-sh -lc "$CMD layer mount '$L2_ID' --json" >/dev/null
-wait_for_path_exists "$L2_MOUNT"
-replay_start="$(ms_now)"
-for i in $(seq 1 "$FILE_COUNT"); do
-  printf "replay-%s\n" "$i" > "$L2_MOUNT/replay-$i.txt"
-done
-wait_for_content "$MOUNTDIR/replay-$FILE_COUNT.txt" "replay-$FILE_COUNT"
-replay_end="$(ms_now)"
-replay_ms=$((replay_end - replay_start))
-
-printf "RESULT attach_switch_ms=%s replay_write_ms=%s file_count=%s\n" "$attach_ms" "$replay_ms" "$FILE_COUNT"
+IFS="${OLD_IFS}"
