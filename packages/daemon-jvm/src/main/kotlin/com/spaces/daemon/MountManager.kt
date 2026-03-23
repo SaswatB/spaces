@@ -9,29 +9,48 @@ import kotlin.time.Duration
 import kotlin.time.Duration.Companion.seconds
 import org.slf4j.LoggerFactory
 
-class MountManager(private val config: Config) {
+interface MountController {
+    fun ensureMount(exportPath: String, localPath: String)
+
+    fun unmount(localPath: String)
+
+    fun isMounted(localPath: String): Boolean
+}
+
+class MountManager(
+        private val config: Config,
+        private val commandRunner: ((List<String>, Duration?) -> CommandResult)? = null
+) : MountController {
     private val logger = LoggerFactory.getLogger(MountManager::class.java)
 
-    fun ensureMount(exportPath: String, localPath: String) {
+    override fun ensureMount(exportPath: String, localPath: String) {
         logger.info("Ensuring mount for $localPath")
-        if (isMounted(localPath)) {
-            logger.info("Mount for $localPath already exists")
-            return
+        val expectedSource = "${config.nfsHost}:$exportPath"
+        val currentSource = mountedSource(localPath)
+        if (currentSource != null) {
+            if (currentSource == expectedSource) {
+                logger.info("Mount for $localPath already exists")
+                return
+            }
+            logger.info(
+                    "Mount for $localPath exists with unexpected source $currentSource, remounting to $expectedSource"
+            )
+            unmount(localPath)
         }
 
         Files.createDirectories(Paths.get(localPath))
-        val source = "${config.nfsHost}:$exportPath"
         val options =
                 listOf("vers=4", "tcp", "port=${config.nfsPort}", "soft", "timeo=10", "retrans=2")
                         .joinToString(",")
-        val result = runCommand(listOf("mount_nfs", "-o", options, source, localPath), 20.seconds)
+        val result =
+                runCommand(listOf("mount_nfs", "-o", options, expectedSource, localPath), 20.seconds)
         if (result.exitCode != 0)
                 throw IOException("mount_nfs failed for $localPath: ${result.stderr}")
-        if (!isMounted(localPath))
+        if (mountedSource(localPath) != expectedSource)
                 throw IOException("mount_nfs succeeded but $localPath not mounted")
     }
 
-    fun unmount(localPath: String) {
+    override fun unmount(localPath: String) {
         logger.info("Unmounting $localPath")
         if (!isMounted(localPath)) {
             logger.info("Mount for $localPath not found")
@@ -59,22 +78,26 @@ class MountManager(private val config: Config) {
         throw IOException("umount failed for $localPath")
     }
 
-    fun isMounted(localPath: String): Boolean {
+    override fun isMounted(localPath: String): Boolean = mountedSource(localPath) != null
+
+    fun mountedSource(localPath: String): String? {
         val output = runCommand(listOf("mount"))
-        if (output.exitCode != 0) return false
+        if (output.exitCode != 0) return null
 
         val canonical = File(localPath).canonicalPath
-        val needle = " on $canonical "
         output.stdout.lineSequence().forEach { line ->
-            if (line.contains(needle)) return true
-
+            val source = line.substringBefore(" on ", "")
             val mountPoint = line.split(" on ").getOrNull(1)?.split(" (")?.getOrNull(0)
-            if (mountPoint != null && File(mountPoint).canonicalPath == canonical) return true
+            if (mountPoint != null && File(mountPoint).canonicalPath == canonical) return source
         }
-        return false
+        return null
     }
 
     private fun runCommand(command: List<String>, timeout: Duration? = null): CommandResult {
+        val customRunner = commandRunner
+        if (customRunner != null) {
+            return customRunner(command, timeout)
+        }
         logger.info("Running command: $command")
         val process = ProcessBuilder(command).redirectErrorStream(false).start()
         if (timeout != null) {

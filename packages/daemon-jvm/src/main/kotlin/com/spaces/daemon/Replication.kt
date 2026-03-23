@@ -195,7 +195,16 @@ class ReplicationService(
                                 System.nanoTime() - item.queuedAtNanos
                         )
                         val runStart = System.nanoTime()
-                        runCatching { vfs.replay(item.sourceMountId, item.targetMountId, item.op) }
+                        if (shouldInvalidateSameLayerTarget(item)) {
+                            suppressSyntheticInvalidationOps(item)
+                        }
+                        runCatching {
+                                    if (shouldInvalidateSameLayerTarget(item)) {
+                                        vfs.invalidateMountPath(item.targetMountId, item.op)
+                                    } else {
+                                        vfs.replay(item.sourceMountId, item.targetMountId, item.op)
+                                    }
+                                }
                                 .onFailure { error ->
                                     logger.warn(
                                             "Replay failed sourceMountId={} targetMountId={} opKind={} path={} targetPath={}",
@@ -238,8 +247,12 @@ class ReplicationService(
         val upserts = mutableListOf<ReplayWorkItem>()
         val lastUpsertIndexByPath = mutableMapOf<String, Int>()
         val reconcileParents = LinkedHashMap<String, ReplayWorkItem>()
-        var pulseItem: ReplayWorkItem? = null
+        val sameLayerInvalidations = LinkedHashMap<String, ReplayWorkItem>()
         for (item in items) {
+            if (shouldInvalidateSameLayerTarget(item)) {
+                sameLayerInvalidations[sameLayerInvalidationKey(item)] = item
+                continue
+            }
             val key = replayPathKey(item)
             when (item.op.kind) {
                 NfsOpKind.Create, NfsOpKind.Write, NfsOpKind.Mkdir, NfsOpKind.Setattr -> {
@@ -253,35 +266,25 @@ class ReplicationService(
                 }
                 NfsOpKind.Remove, NfsOpKind.Rmdir -> {
                     lastUpsertIndexByPath.remove(key)
-                    if (shouldPulseInsteadOfReplay(item)) {
-                        pulseItem = pulseItem ?: item
-                    } else {
-                        reconcileParents[parentRelativePath(item.op.relativePath)] =
-                                replayDirectoryItem(item, parentRelativePath(item.op.relativePath))
-                    }
+                    reconcileParents[parentRelativePath(item.op.relativePath)] =
+                            replayDirectoryItem(item, parentRelativePath(item.op.relativePath))
                 }
                 NfsOpKind.Rename -> {
                     lastUpsertIndexByPath.remove(key)
                     item.op.targetRelativePath?.let { target ->
                         lastUpsertIndexByPath.remove(replayPathKey(item, target))
                     }
-                    if (shouldPulseInsteadOfReplay(item)) {
-                        pulseItem = pulseItem ?: item
-                    } else {
-                        val fromParent = parentRelativePath(item.op.relativePath)
-                        reconcileParents[fromParent] = replayDirectoryItem(item, fromParent)
-                        val toParent = parentRelativePath(item.op.targetRelativePath.orEmpty())
-                        reconcileParents[toParent] = replayDirectoryItem(item, toParent)
-                    }
+                    val fromParent = parentRelativePath(item.op.relativePath)
+                    reconcileParents[fromParent] = replayDirectoryItem(item, fromParent)
+                    val toParent = parentRelativePath(item.op.targetRelativePath.orEmpty())
+                    reconcileParents[toParent] = replayDirectoryItem(item, toParent)
                 }
             }
         }
         val normalized = mutableListOf<ReplayWorkItem>()
         normalized.addAll(upserts)
         normalized.addAll(reconcileParents.values)
-        if (pulseItem != null) {
-            normalized.add(pulseItem)
-        }
+        normalized.addAll(sameLayerInvalidations.values)
         return normalized
     }
 
@@ -304,16 +307,61 @@ class ReplicationService(
         return if (slashIndex < 0) "" else normalized.substring(0, slashIndex)
     }
 
-    private fun shouldPulseInsteadOfReplay(item: ReplayWorkItem): Boolean {
-        if (item.op.kind != NfsOpKind.Remove &&
-                        item.op.kind != NfsOpKind.Rmdir &&
-                        item.op.kind != NfsOpKind.Rename
-        ) {
-            return false
-        }
+    private fun shouldInvalidateSameLayerTarget(item: ReplayWorkItem): Boolean {
         val targetUserMount = db.getUserMount(item.targetMountId) ?: return false
         val sourceLayerId = underlyingLayerId(item.sourceMountId) ?: return false
         return targetUserMount.attachedLayerId == sourceLayerId
+    }
+
+    private fun sameLayerInvalidationKey(item: ReplayWorkItem): String {
+        return when (item.op.kind) {
+            NfsOpKind.Remove, NfsOpKind.Rmdir ->
+                    "parent:${item.targetMountId}:${parentRelativePath(item.op.relativePath)}"
+            NfsOpKind.Rename ->
+                    "rename:${item.targetMountId}:${item.op.relativePath}:${item.op.targetRelativePath.orEmpty()}"
+            else -> "path:${item.targetMountId}:${item.op.relativePath}"
+        }
+    }
+
+    private fun suppressSyntheticInvalidationOps(item: ReplayWorkItem) {
+        syntheticInvalidationOps(item).forEach { engine.suppress(suppressionKey(it)) }
+    }
+
+    private fun syntheticInvalidationOps(item: ReplayWorkItem): List<NfsOp> {
+        val mountId = item.targetMountId
+        return when (item.op.kind) {
+            NfsOpKind.Create, NfsOpKind.Write, NfsOpKind.Mkdir, NfsOpKind.Setattr ->
+                    listOf(NfsOp(mountId, item.op.relativePath, NfsOpKind.Setattr))
+            NfsOpKind.Remove, NfsOpKind.Rmdir ->
+                    listOf(
+                            NfsOp(
+                                    mountId,
+                                    parentRelativePath(item.op.relativePath),
+                                    NfsOpKind.Setattr
+                            )
+                    )
+            NfsOpKind.Rename -> {
+                val ops = mutableListOf<NfsOp>()
+                ops += NfsOp(mountId, parentRelativePath(item.op.relativePath), NfsOpKind.Setattr)
+                item.op.targetRelativePath?.let { target ->
+                    ops += NfsOp(mountId, parentRelativePath(target), NfsOpKind.Setattr)
+                    ops += NfsOp(mountId, target, NfsOpKind.Setattr)
+                    val scratch = renameScratchRelativePath(target)
+                    ops += NfsOp(mountId, target, NfsOpKind.Rename, scratch)
+                    ops += NfsOp(mountId, scratch, NfsOpKind.Rename, target)
+                }
+                ops
+            }
+        }
+    }
+
+    private fun renameScratchRelativePath(relativePath: String): String {
+        val normalized = relativePath.trim('/')
+        if (normalized.isBlank()) return ".spaces-rename-notify"
+        val path = java.nio.file.Paths.get(normalized)
+        val scratchName = ".${path.fileName}.spaces-rename-notify"
+        val parent = path.parent
+        return parent?.resolve(scratchName)?.toString() ?: scratchName
     }
 
     private fun underlyingLayerId(mountId: String): String? {

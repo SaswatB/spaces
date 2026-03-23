@@ -9,7 +9,7 @@ import java.util.UUID
 class SpacesService(
         private val config: Config,
         private val db: SpacesDatabase,
-        private val mountManager: MountManager,
+        private val mountManager: MountController,
         private val replication: ReplicationService,
         private val vfs: SpacesVfs
 ) {
@@ -205,27 +205,57 @@ class SpacesService(
         }
         val now = nowSeconds()
         val nextGeneration = if (oldLayerId == layerId) mount.generation else mount.generation + 1
-        if (oldLayerId != layerId) {
-            vfs.invalidateMountState(userMountId)
-            runCatching { unmountUserMount(mount) }
+        if (oldLayerId == layerId) {
+            return
         }
-        db.updateUserMountLayer(userMountId, layerId, nextGeneration, now)
-        val updated = db.getUserMount(userMountId)
-        if (layerId != null) {
-            val layer = db.getLayer(layerId)
-            if (layer != null) {
-                mountLayer(layer)
+
+        vfs.invalidateMountState(userMountId)
+        unmountUserMount(mount)
+
+        val updatedAt = now
+        db.updateUserMountLayer(userMountId, layerId, nextGeneration, updatedAt)
+        val updated = db.getUserMount(userMountId) ?: throw IllegalStateException("User mount disappeared")
+        try {
+            if (layerId != null) {
+                val layer = db.getLayer(layerId)
+                if (layer != null) {
+                    mountLayer(layer)
+                }
             }
-        }
-        if (updated != null && oldLayerId != layerId) {
             mountUserMount(updated)
-        }
-        if (updated != null && oldLayerId != layerId) {
             replication.handleLayerSwitchInvalidation(updated.mountPath, oldLayerId, layerId)
             if (!replication.awaitMountInvalidation(updated.mountPath)) {
                 throw IllegalStateException("Timed out waiting for mount attach invalidation to settle")
             }
+        } catch (error: Exception) {
+            rollbackAttach(userMountId, mount, oldLayerId, error)
         }
+    }
+
+    private fun rollbackAttach(
+            userMountId: String,
+            originalMount: UserMountRecord,
+            originalLayerId: String?,
+            cause: Exception
+    ): Nothing {
+        val rollbackAt = nowSeconds()
+        db.updateUserMountLayer(
+                userMountId,
+                originalLayerId,
+                originalMount.generation,
+                rollbackAt
+        )
+        val restored = db.getUserMount(userMountId)
+        if (originalLayerId != null) {
+            val layer = db.getLayer(originalLayerId)
+            if (layer != null) {
+                runCatching { mountLayer(layer) }
+            }
+        }
+        if (restored != null) {
+            runCatching { mountUserMount(restored) }
+        }
+        throw IllegalStateException("Failed to attach user mount to requested layer", cause)
     }
 
     fun mountUserMount(mount: UserMountRecord) {

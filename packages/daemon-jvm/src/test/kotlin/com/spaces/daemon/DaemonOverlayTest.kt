@@ -13,12 +13,16 @@ import kotlin.io.path.writeText
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
 import kotlin.test.fail
 import org.dcache.nfs.status.ExistException
 import org.dcache.nfs.status.NoEntException
+import org.dcache.nfs.v4.xdr.nfs4_prot
+import org.dcache.nfs.v4.xdr.stateid4
 import org.dcache.nfs.vfs.Inode
 import org.dcache.nfs.vfs.Stat
+import org.dcache.nfs.vfs.VirtualFileSystem
 
 class DaemonOverlayTest {
     @Test
@@ -100,13 +104,124 @@ class DaemonOverlayTest {
     fun replayDirectoryViewRemovesStaleEntries() = withTestEnv { env ->
         (env.entrypointRoot / "dir").createDirectories()
         env.writeEntrypointFile("dir/keep.txt", "fresh")
-        env.writeUserMountFile("mount", "dir/stale.txt", "stale")
-        env.writeUserMountFile("mount", "dir/keep.txt", "old")
+        env.writeUserMountFile("mirror", "dir/stale.txt", "stale")
+        env.writeUserMountFile("mirror", "dir/keep.txt", "old")
 
-        env.vfs.replay("child", "mount", NfsOp("child", "dir", NfsOpKind.Mkdir))
+        env.vfs.replay("child", "mirror", NfsOp("child", "dir", NfsOpKind.Mkdir))
 
-        assertEquals("fresh", (env.userMountPath("mount") / "dir/keep.txt").readText())
-        assertFalse((env.userMountPath("mount") / "dir/stale.txt").exists())
+        assertEquals("fresh", (env.userMountPath("mirror") / "dir/keep.txt").readText())
+        assertFalse((env.userMountPath("mirror") / "dir/stale.txt").exists())
+    }
+
+    @Test
+    fun statefulWriteFlushesOnFirstWriteAndClose() = withTestEnv { env ->
+        env.writeLayerFile("child", "stateful.txt", "old")
+        val captured = mutableListOf<NfsOp>()
+        env.vfs.setOpHandler { captured.add(it) }
+        val inode = env.vfs.lookup(env.layerRoot("child"), "stateful.txt")
+        val stateid = stateid4(ByteArray(12) { 7 }, 1)
+
+        env.vfs.registerOpenState(inode, stateid, nfs4_prot.OPEN4_SHARE_ACCESS_WRITE)
+        env.vfs.writeWithState(
+                inode,
+                stateid,
+                "new".toByteArray(),
+                0,
+                3,
+                VirtualFileSystem.StabilityLevel.UNSTABLE
+        )
+
+        assertEquals(1, captured.size)
+
+        env.vfs.writeWithState(
+                inode,
+                stateid,
+                "new!".toByteArray(),
+                0,
+                4,
+                VirtualFileSystem.StabilityLevel.UNSTABLE
+        )
+        assertEquals(1, captured.size)
+
+        env.vfs.closeOpenState(stateid)
+
+        assertEquals(2, captured.size)
+        assertTrue(captured.all { it.kind == NfsOpKind.Write })
+        assertTrue(captured.all { it.relativePath == "stateful.txt" })
+    }
+
+    @Test
+    fun statefulWriteFlushesDuringLongLivedHandle() = withTestEnv { env ->
+        env.writeLayerFile("child", "stream.txt", "old")
+        val captured = mutableListOf<NfsOp>()
+        env.vfs.setOpHandler { captured.add(it) }
+        val inode = env.vfs.lookup(env.layerRoot("child"), "stream.txt")
+        val stateid = stateid4(ByteArray(12) { 3 }, 1)
+
+        env.vfs.registerOpenState(inode, stateid, nfs4_prot.OPEN4_SHARE_ACCESS_WRITE)
+        env.vfs.writeWithState(
+                inode,
+                stateid,
+                "one".toByteArray(),
+                0,
+                3,
+                VirtualFileSystem.StabilityLevel.UNSTABLE
+        )
+        assertTrue(captured.isNotEmpty())
+        val firstCount = captured.size
+
+        env.vfs.writeWithState(
+                inode,
+                stateid,
+                "two".toByteArray(),
+                0,
+                3,
+                VirtualFileSystem.StabilityLevel.UNSTABLE
+        )
+        assertEquals(firstCount, captured.size)
+
+        Thread.sleep(120)
+        env.vfs.writeWithState(
+                inode,
+                stateid,
+                "tri".toByteArray(),
+                0,
+                3,
+                VirtualFileSystem.StabilityLevel.UNSTABLE
+        )
+        assertTrue(captured.size > firstCount)
+
+        env.vfs.closeOpenState(stateid)
+    }
+
+    @Test
+    fun attachLayerRollsBackDatabaseStateWhenRemountFails() = withTestEnv { env ->
+        val mountManager = FakeMountController()
+        mountManager.markMounted(env.userMountRecord.mountPath, "/mounts/${env.userMountRecord.id}")
+        mountManager.failEnsureOnceForPath = env.userMountRecord.mountPath
+        val service = env.serviceWithMountController(mountManager)
+
+        assertFailsWith<IllegalStateException> { service.attachLayer("mount", "parent") }
+
+        val mount = env.db.getUserMount("mount") ?: fail("mount missing")
+        assertEquals("child", mount.attachedLayerId)
+        assertEquals(0, mount.generation)
+        assertEquals("/mounts/mount", mountManager.mountedSourceByPath[env.userMountRecord.mountPath])
+    }
+
+    @Test
+    fun attachLayerDoesNotMutateDatabaseWhenUnmountFails() = withTestEnv { env ->
+        val mountManager = FakeMountController()
+        mountManager.markMounted(env.userMountRecord.mountPath, "/mounts/${env.userMountRecord.id}")
+        mountManager.failUnmountForPath = env.userMountRecord.mountPath
+        val service = env.serviceWithMountController(mountManager)
+
+        assertFailsWith<Exception> { service.attachLayer("mount", "parent") }
+
+        val mount = env.db.getUserMount("mount") ?: fail("mount missing")
+        assertEquals("child", mount.attachedLayerId)
+        assertEquals(0, mount.generation)
+        assertEquals("/mounts/mount", mountManager.mountedSourceByPath[env.userMountRecord.mountPath])
     }
 }
 
@@ -136,6 +251,8 @@ private class TestEnv(root: Path) {
     val vfs = SpacesVfs(db)
     val replication = ReplicationService(db, ReplicationEngine(), vfs)
     val service: SpacesService
+    val userMountRecord: UserMountRecord
+    val mirrorMountRecord: UserMountRecord
 
     init {
         db.initialize()
@@ -156,7 +273,8 @@ private class TestEnv(root: Path) {
         insertEntrypoint("ep", entrypointRoot)
         insertLayer("parent", "ep", null)
         insertLayer("child", "ep", "parent")
-        insertUserMount("mount", "ep", "child")
+        userMountRecord = insertUserMount("mount", "ep", "child")
+        mirrorMountRecord = insertUserMount("mirror", "ep", null)
     }
 
     fun layerRoot(layerId: String): Inode {
@@ -195,6 +313,19 @@ private class TestEnv(root: Path) {
         return buffer.copyOf(read).toString(Charsets.UTF_8)
     }
 
+    fun serviceWithMountController(mountController: MountController): SpacesService {
+        val config =
+                Config(
+                        dataDir = dataDir.toString(),
+                        dbPath = dbPath.toString(),
+                        apiHost = "127.0.0.1",
+                        apiPort = 3100,
+                        nfsHost = "127.0.0.1",
+                        nfsPort = 11111
+                )
+        return SpacesService(config, db, mountController, replication, vfs)
+    }
+
     private fun insertEntrypoint(id: String, path: Path) {
         db.insertEntrypoint(
                 EntrypointRecord(
@@ -227,12 +358,12 @@ private class TestEnv(root: Path) {
         )
     }
 
-    private fun insertUserMount(id: String, entrypointId: String, layerId: String?) {
+    private fun insertUserMount(id: String, entrypointId: String, layerId: String?): UserMountRecord {
         val root = dataDir / "usermounts" / id
         Files.createDirectories(root / "upper")
         Files.createDirectories(root / "work")
         Files.createDirectories(dataDir / "mounts" / id)
-        db.insertUserMount(
+        val record =
                 UserMountRecord(
                         id = id,
                         name = id,
@@ -244,7 +375,42 @@ private class TestEnv(root: Path) {
                         mountPath = (dataDir / "mounts" / id).toString(),
                         createdAt = 0,
                         updatedAt = 0
-                )
         )
+        db.insertUserMount(record)
+        return record
+    }
+}
+
+private class FakeMountController : MountController {
+    val mountedSourceByPath = mutableMapOf<String, String>()
+    var failUnmountForPath: String? = null
+    var failEnsureForPath: String? = null
+    var failEnsureOnceForPath: String? = null
+
+    override fun ensureMount(exportPath: String, localPath: String) {
+        if (mountedSourceByPath[localPath] != null && mountedSourceByPath[localPath] != exportPath) {
+            unmount(localPath)
+        }
+        if (failEnsureOnceForPath == localPath) {
+            failEnsureOnceForPath = null
+            throw java.io.IOException("synthetic ensure failure")
+        }
+        if (failEnsureForPath == localPath) {
+            throw java.io.IOException("synthetic ensure failure")
+        }
+        mountedSourceByPath[localPath] = exportPath
+    }
+
+    override fun unmount(localPath: String) {
+        if (failUnmountForPath == localPath) {
+            throw java.io.IOException("synthetic unmount failure")
+        }
+        mountedSourceByPath.remove(localPath)
+    }
+
+    override fun isMounted(localPath: String): Boolean = mountedSourceByPath.containsKey(localPath)
+
+    fun markMounted(localPath: String, exportPath: String) {
+        mountedSourceByPath[localPath] = exportPath
     }
 }

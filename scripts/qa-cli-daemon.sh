@@ -819,6 +819,77 @@ run_vite_hot_swap_case() {
   rm -f "$vite_log"
 }
 
+run_vite_same_layer_edit_case() {
+  name="$1"
+  source_layer_mount_path="$2"
+  serve_path="$3"
+  rel="$4"
+  initial_marker="$5"
+  expected_marker="$6"
+  vite_log="$(mktemp /tmp/spaces-qa-vite.XXXXXX)"
+
+  set +e
+  source_ready=1
+  wait_for_path_exists "$serve_path/index.html" "$WAIT_LONG_ATTEMPTS" &&
+    wait_for_path_exists "$serve_path/src/main.js" "$WAIT_LONG_ATTEMPTS" &&
+    wait_for_path_exists "$serve_path/$rel" "$WAIT_LONG_ATTEMPTS" &&
+    wait_for_path_exists "$source_layer_mount_path/$rel" "$WAIT_LONG_ATTEMPTS" &&
+    source_ready=0
+
+  vite_pid=""
+  vite_ready=1
+  if [ "$source_ready" -eq 0 ]; then
+    sh -lc "cd '$ROOT_DIR/packages/web' && env -u NODE_OPTIONS pnpm exec vite '$serve_path' --host 127.0.0.1 --port '$VITE_PORT' --strictPort --clearScreen false" >"$vite_log" 2>&1 &
+    vite_pid=$!
+    for _ in $(seq 1 "$WAIT_LONG_ATTEMPTS"); do
+      if curl -sf "http://127.0.0.1:$VITE_PORT/" >/dev/null 2>&1; then
+        vite_ready=0
+        break
+      fi
+      sleep "$WAIT_STEP_SECONDS"
+    done
+  fi
+
+  baseline_code=1
+  if [ "$vite_ready" -eq 0 ]; then
+    wait_for_http_content "http://127.0.0.1:$VITE_PORT/src/message.js" "$initial_marker" "$WAIT_LONG_ATTEMPTS" && baseline_code=0
+  fi
+
+  write_code=1
+  if [ "$baseline_code" -eq 0 ]; then
+    printf 'export const message = "%s";\n' "$expected_marker" > "$source_layer_mount_path/$rel" 2>/tmp/spaces-qa-vite-same-layer.err
+    write_code=$?
+  fi
+  write_out="$(cat /tmp/spaces-qa-vite-same-layer.err 2>/dev/null || true)"
+
+  served_code=1
+  wait_for_http_content "http://127.0.0.1:$VITE_PORT/src/message.js" "$expected_marker" "$WAIT_LONG_ATTEMPTS" && served_code=0
+  served_body="$(curl -sf "http://127.0.0.1:$VITE_PORT/src/message.js" 2>/dev/null || true)"
+
+  if [ -n "$vite_pid" ]; then
+    kill "$vite_pid" >/dev/null 2>&1 || true
+    wait "$vite_pid" >/dev/null 2>&1 || true
+  fi
+  set -e
+
+  if [ "$source_ready" -eq 0 ] &&
+    [ "$vite_ready" -eq 0 ] &&
+    [ "$baseline_code" -eq 0 ] &&
+    [ "$write_code" -eq 0 ] &&
+    [ "$served_code" -eq 0 ]; then
+    printf "PASS | %s\n" "$name"
+    PASS=$((PASS + 1))
+  else
+    printf "FAIL | %s\n" "$name"
+    FAIL=$((FAIL + 1))
+  fi
+
+  sed -n '1,12p' "$vite_log"
+  printf "write=%s\n" "$write_out"
+  printf "served-marker=%s\n\n" "$(printf "%s" "$served_body" | tr '\n' ' ' | sed 's/  */ /g')"
+  rm -f "$vite_log" /tmp/spaces-qa-vite-same-layer.err
+}
+
 run_open_fd_attach_case() {
   name="$1"
   mount_id="$2"
@@ -1069,6 +1140,11 @@ if [ -n "$MOUNT_ID" ]; then
     run_open_fd_attach_case "mount attach invalidates stale writable file descriptor and allows reopen" "$MOUNT_ID" "$LAYER2_ID" "$MOUNTDIR" "hot-switch.txt" "layer-one" "layer-two"
     run_case "mount attach reset to layer1 for vite dev-server case" 0 sh -lc "$CMD mount attach '$MOUNT_ID' '$LAYER_ID' --json"
     run_vite_hot_swap_case "vite dev server serves updated mounted content after layer hot swap" "$MOUNT_ID" "$LAYER2_ID" "$MOUNTDIR" "layer-one-vite" "layer-two-vite"
+    if [ -n "$LAYER2_MOUNT_PATH" ]; then
+      run_case "mount attach layer2 baseline for same-layer vite edit case" 0 sh -lc "$CMD mount attach '$MOUNT_ID' '$LAYER2_ID' --json"
+      run_case "layer2 mount ensure for same-layer vite edit case" 1 sh -lc "$CMD layer mount '$LAYER2_ID' --json"
+      run_vite_same_layer_edit_case "vite dev server reloads after same-layer file edit through layer mount" "$LAYER2_MOUNT_PATH" "$MOUNTDIR" "src/message.js" "layer-two-vite" "layer-two-vite-live"
+    fi
   fi
 
   if [ -n "$LAYER_ID" ] && [ -n "$LAYER2_ID" ]; then

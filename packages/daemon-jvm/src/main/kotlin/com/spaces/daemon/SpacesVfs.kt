@@ -459,7 +459,6 @@ class SpacesVfs(private val db: SpacesDatabase) : VirtualFileSystem {
         requireKnown(resolved)
         val mount = resolved.mountView ?: throw NoEntException()
         ensureWritable(mount)
-        val rel = resolved.relativePath
         val key = stateKey(stateid)
         val handle = openWriteHandles[key]
         if (handle != null) {
@@ -472,8 +471,9 @@ class SpacesVfs(private val db: SpacesDatabase) : VirtualFileSystem {
             return try {
                 val buffer = ByteBuffer.wrap(data, 0, count)
                 val written = handle.channel.write(buffer, offset)
+                handle.dirty = true
+                maybeFlushOpenHandle(handle)
                 logOpEnd("WRITE", handle.path.toString(), start)
-                emitOp(mount, rel, NfsOpKind.Write)
                 VirtualFileSystem.WriteResult(stabilityLevel, written)
             } catch (_: ClosedChannelException) {
                 openWriteHandles.remove(stateKey(stateid))
@@ -501,8 +501,10 @@ class SpacesVfs(private val db: SpacesDatabase) : VirtualFileSystem {
                         OpenHandle(
                                 channel = channel,
                                 path = target,
+                                relativePath = resolved.relativePath,
                                 mountId = resolved.mountId,
-                                mountGeneration = resolved.mountView?.mountGeneration
+                                mountGeneration = resolved.mountView?.mountGeneration,
+                                dirty = false
                         )
                 )
         if (existing != null) {
@@ -524,6 +526,7 @@ class SpacesVfs(private val db: SpacesDatabase) : VirtualFileSystem {
         val handle = openWriteHandles.remove(key) ?: return
         try {
             handle.channel.close()
+            flushOpenHandle(handle)
         } catch (e: Exception) {
             logger.warn(
                     "Failed to close open state stateid={} path={}",
@@ -1046,6 +1049,22 @@ class SpacesVfs(private val db: SpacesDatabase) : VirtualFileSystem {
         )
     }
 
+    private fun maybeFlushOpenHandle(handle: OpenHandle) {
+        val now = System.nanoTime()
+        if (now - handle.lastReplayNanos < OPEN_HANDLE_FLUSH_INTERVAL_NANOS) {
+            return
+        }
+        flushOpenHandle(handle)
+    }
+
+    private fun flushOpenHandle(handle: OpenHandle) {
+        if (!handle.dirty) return
+        val mountView = buildMountViewById(handle.mountId ?: "") ?: return
+        handle.dirty = false
+        handle.lastReplayNanos = System.nanoTime()
+        emitOp(mountView, handle.relativePath, NfsOpKind.Write)
+    }
+
     private fun logOpStart(op: String, path: String) {
         logger.debug("{} start path={}", op, path)
     }
@@ -1182,7 +1201,10 @@ class SpacesVfs(private val db: SpacesDatabase) : VirtualFileSystem {
 
     private fun emitSwitchPulseEvent(mountRoot: Path) {
         if (!Files.exists(mountRoot)) return
-        val pulse = mountRoot.resolve(".spaces-reload-pulse.${UUID.randomUUID()}")
+        emitPulseFile(mountRoot, mountRoot.resolve(".spaces-reload-pulse.${UUID.randomUUID()}"))
+    }
+
+    private fun emitPulseFile(mountRoot: Path, pulse: Path) {
         runCatching {
                     Files.writeString(
                             pulse,
@@ -1223,12 +1245,6 @@ class SpacesVfs(private val db: SpacesDatabase) : VirtualFileSystem {
             // Target writes intentionally go through the target mount path to surface real filesystem
             // change notifications for external watchers (dev servers, hot-reload tooling).
             val targetRoot = mountPathForId(targetMountId) ?: return@timed
-            if (shouldPulseInsteadOfReplay(sourceMountId, targetMountId, op)) {
-                PerfStats.timed("replay.emit_pulse") {
-                    emitSwitchPulseEvent(Paths.get(targetRoot))
-                }
-                return@timed
-            }
 
             when (op.kind) {
                 NfsOpKind.Remove, NfsOpKind.Rmdir ->
@@ -1256,6 +1272,28 @@ class SpacesVfs(private val db: SpacesDatabase) : VirtualFileSystem {
         }
     }
 
+    fun invalidateMountPath(targetMountId: String, op: NfsOp) {
+        PerfStats.timed("replay.invalidate_path") {
+            val targetRoot = mountPathForId(targetMountId) ?: return@timed
+            val root = Paths.get(targetRoot)
+            when (op.kind) {
+                NfsOpKind.Create, NfsOpKind.Write, NfsOpKind.Mkdir, NfsOpKind.Setattr ->
+                        invalidateVisiblePath(root, op.relativePath, preferParent = false)
+                NfsOpKind.Remove, NfsOpKind.Rmdir ->
+                        invalidateVisiblePath(root, parentRelativePath(op.relativePath), preferParent = false)
+                NfsOpKind.Rename -> {
+                    invalidateVisiblePath(root, parentRelativePath(op.relativePath), preferParent = false)
+                    op.targetRelativePath?.let { target ->
+                        if (!notifyRenameVisiblePath(root, target)) {
+                            invalidateVisiblePath(root, parentRelativePath(target), preferParent = false)
+                            invalidateVisiblePath(root, target, preferParent = false)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     private fun shouldSkipReplayEchoToAttachedLayer(
             sourceMountId: String,
             targetMountId: String,
@@ -1269,22 +1307,6 @@ class SpacesVfs(private val db: SpacesDatabase) : VirtualFileSystem {
                 overlay.resolvePath(sourceMount.view, op.relativePath)?.source ?: return false
         val targetUpper = Paths.get(targetLayer.upperDir).normalize()
         return sourcePath.normalize().startsWith(targetUpper)
-    }
-
-    private fun shouldPulseInsteadOfReplay(
-            sourceMountId: String,
-            targetMountId: String,
-            op: NfsOp
-    ): Boolean {
-        if (op.kind != NfsOpKind.Remove &&
-                        op.kind != NfsOpKind.Rmdir &&
-                        op.kind != NfsOpKind.Rename
-        ) {
-            return false
-        }
-        val targetUserMount = db.getUserMount(targetMountId) ?: return false
-        val sourceLayerId = underlyingLayerId(sourceMountId) ?: return false
-        return targetUserMount.attachedLayerId == sourceLayerId
     }
 
     private fun underlyingLayerId(mountId: String): String? {
@@ -1307,9 +1329,8 @@ class SpacesVfs(private val db: SpacesDatabase) : VirtualFileSystem {
     }
 
     private fun replayUpsert(sourceMount: MountView, targetRoot: Path, relative: String) {
-        val source = resolveReplaySource(sourceMount, relative)
-        if (source == null) return
         val target = targetRoot.resolve(relative)
+        val source = resolveReplaySource(sourceMount, relative) ?: return
         if (Files.isDirectory(source)) {
             replayDirectoryView(sourceMount, targetRoot, relative)
             return
@@ -1320,6 +1341,80 @@ class SpacesVfs(private val db: SpacesDatabase) : VirtualFileSystem {
     private fun replayDelete(targetRoot: Path, relative: String) {
         val target = targetRoot.resolve(relative)
         deletePath(target)
+    }
+
+    private fun invalidateVisiblePath(targetRoot: Path, relative: String, preferParent: Boolean) {
+        val candidate = normalizedTargetPath(targetRoot, relative)
+        val target =
+                when {
+                    !preferParent && candidate != null && Files.exists(candidate) -> candidate
+                    else -> nearestExistingDirectory(targetRoot, candidate?.parent ?: targetRoot)
+                } ?: targetRoot
+        touchVisiblePath(target)
+    }
+
+    private fun normalizedTargetPath(targetRoot: Path, relative: String): Path? {
+        val trimmed = relative.trim('/')
+        if (trimmed.isBlank()) return targetRoot
+        val candidate = targetRoot.resolve(trimmed).normalize()
+        return if (candidate.startsWith(targetRoot.normalize())) candidate else null
+    }
+
+    private fun nearestExistingDirectory(targetRoot: Path, start: Path): Path? {
+        var current = start.normalize()
+        while (current.startsWith(targetRoot.normalize())) {
+            if (Files.exists(current) && Files.isDirectory(current)) {
+                return current
+            }
+            current = current.parent ?: break
+        }
+        return if (Files.exists(targetRoot) && Files.isDirectory(targetRoot)) targetRoot else null
+    }
+
+    private fun touchVisiblePath(target: Path): Boolean {
+        return runCatching {
+                    if (!Files.exists(target)) return false
+                    if (Files.isSymbolicLink(target)) {
+                        val parent = target.parent
+                        if (parent == null || !Files.exists(parent)) return false
+                        Files.setLastModifiedTime(parent, FileTime.from(Instant.now()))
+                    } else {
+                        Files.setLastModifiedTime(target, FileTime.from(Instant.now()))
+                    }
+                    true
+                }
+                .getOrElse { false }
+    }
+
+    private fun notifyRenameVisiblePath(targetRoot: Path, relative: String): Boolean {
+        val target = normalizedTargetPath(targetRoot, relative) ?: return false
+        if (!Files.exists(target)) return false
+        val scratch = normalizedTargetPath(targetRoot, renameScratchRelativePath(relative)) ?: return false
+        return runCatching {
+                    scratch.parent?.let { Files.createDirectories(it) }
+                    Files.deleteIfExists(scratch)
+                    Files.move(target, scratch, StandardCopyOption.REPLACE_EXISTING)
+                    Files.move(scratch, target, StandardCopyOption.REPLACE_EXISTING)
+                    true
+                }
+                .getOrElse { false }
+    }
+
+    private fun parentRelativePath(relativePath: String): String {
+        if (relativePath.isBlank()) return ""
+        val normalized = relativePath.trim('/')
+        if (normalized.isEmpty()) return ""
+        val slashIndex = normalized.lastIndexOf('/')
+        return if (slashIndex < 0) "" else normalized.substring(0, slashIndex)
+    }
+
+    private fun renameScratchRelativePath(relativePath: String): String {
+        val normalized = relativePath.trim('/')
+        if (normalized.isBlank()) return ".spaces-rename-notify"
+        val path = Paths.get(normalized)
+        val scratchName = ".${path.fileName}.spaces-rename-notify"
+        val parent = path.parent
+        return parent?.resolve(scratchName)?.toString() ?: scratchName
     }
 
     private fun replayRename(
@@ -1401,16 +1496,11 @@ class SpacesVfs(private val db: SpacesDatabase) : VirtualFileSystem {
     }
 
     private fun resolveReplaySource(sourceMount: MountView, relative: String): Path? {
-        repeat(10) { attempt ->
-            val source = overlay.resolvePath(sourceMount.view, relative)?.source
-            if (source != null && (Files.exists(source) || Files.isSymbolicLink(source))) {
-                return source
-            }
-            if (attempt < 9) {
-                Thread.sleep(5)
-            }
+        val source = overlay.resolvePath(sourceMount.view, relative)?.source
+        if (source != null && (Files.exists(source) || Files.isSymbolicLink(source))) {
+            return source
         }
-        return overlay.resolvePath(sourceMount.view, relative)?.source
+        return null
     }
 
     private fun copyFile(source: Path, target: Path) {
@@ -1493,9 +1583,14 @@ private data class HandleEntry(
 private data class OpenHandle(
         val channel: FileChannel,
         val path: Path,
+        val relativePath: String,
         val mountId: String?,
-        val mountGeneration: Long?
+        val mountGeneration: Long?,
+        var dirty: Boolean,
+        var lastReplayNanos: Long = 0
 )
+
+private const val OPEN_HANDLE_FLUSH_INTERVAL_NANOS = 100_000_000L
 
 data class MountView(
         val view: OverlayView,
