@@ -31,8 +31,6 @@ data class UserMount(
     val name: String,
     val entrypointId: String,
     val attachedLayerId: String?,
-    val upperDir: String,
-    val workDir: String,
     val mountPath: String,
     val createdAt: String,
     val updatedAt: String
@@ -67,8 +65,6 @@ data class UserMountResponse(
     val name: String,
     val entrypointId: String,
     val attachedLayerId: String?,
-    val upperDir: String,
-    val workDir: String,
     val mountPath: String,
     val mountStatus: MountStatus,
     val createdAt: String,

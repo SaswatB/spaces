@@ -31,6 +31,7 @@ VITE_PORT="${SPACES_QA_VITE_PORT:-$((35000 + ($$ % 1000)))}"
 mkdir -p "$ENTRY" "$ENTRY2" "$MOUNTDIR" "$STATE" "$DATA" "$DBDIR" "$RUNTIME_ROOT"
 echo "hello" > "$ENTRY/file.txt"
 echo "hello-two" > "$ENTRY2/file.txt"
+ln -s missing-target "$ENTRY/broken-link"
 mkdir -p "$ENTRY/src"
 cat > "$ENTRY/index.html" <<'EOF'
 <!doctype html>
@@ -584,6 +585,360 @@ const watcher = fs.watch(root, { recursive: true }, (eventType, filename) => {
   rm -f "$watch_file"
 }
 
+run_readlink_case() {
+  name="$1"
+  path="$2"
+  expected="$3"
+
+  link_target=""
+  link_code=1
+  for _ in $(seq 1 "$WAIT_LONG_ATTEMPTS"); do
+    if link_target="$(readlink "$path" 2>/dev/null)"; then
+      if [ "$link_target" = "$expected" ]; then
+        link_code=0
+        break
+      fi
+    fi
+    sleep "$WAIT_STEP_SECONDS"
+  done
+
+  if [ "$link_code" -eq 0 ]; then
+    printf "PASS | %s\n" "$name"
+    PASS=$((PASS + 1))
+  else
+    printf "FAIL | %s\n" "$name"
+    FAIL=$((FAIL + 1))
+  fi
+  printf "path=%s target=%s expected=%s\n\n" "$path" "$link_target" "$expected"
+}
+
+run_same_layer_atomic_save_case() {
+  name="$1"
+  source_layer_mount_path="$2"
+  watch_path="$3"
+  rel="$4"
+  initial="$5"
+  final_content="$6"
+  watch_file="$(mktemp /tmp/spaces-qa-watch.XXXXXX)"
+
+  wait_for_content "$watch_path/$rel" "$initial" "$WAIT_LONG_ATTEMPTS" >/dev/null 2>&1 || true
+
+  set +e
+  env -u NODE_OPTIONS node -e '
+const fs = require("fs");
+const root = process.argv[1];
+const timeoutMs = Number(process.argv[2] || "4000");
+let done = false;
+const timer = setTimeout(() => {
+  if (!done) {
+    done = true;
+    console.error("watch-timeout");
+    process.exit(1);
+  }
+}, timeoutMs);
+const watcher = fs.watch(root, { recursive: true }, (eventType, filename) => {
+  if (done) return;
+  done = true;
+  clearTimeout(timer);
+  watcher.close();
+  console.log(`watch-event ${eventType} ${String(filename || "")}`);
+  process.exit(0);
+});
+  ' "$watch_path" "$WATCH_TIMEOUT_REPLAY_MS" > "$watch_file" 2>&1 &
+  watcher_pid=$!
+  sleep "$WATCHER_READY_DELAY_SECONDS"
+
+  env -u NODE_OPTIONS node -e '
+const fs = require("fs");
+const path = require("path");
+const root = process.argv[1];
+const rel = process.argv[2];
+const finalContent = process.argv[3];
+const target = path.join(root, rel);
+const tmp = path.join(root, `${rel}.tmp`);
+fs.writeFileSync(tmp, finalContent);
+fs.renameSync(tmp, target);
+  ' "$source_layer_mount_path" "$rel" "$final_content" >/tmp/spaces-qa-atomic-save.err 2>&1
+  write_code=$?
+  write_out="$(cat /tmp/spaces-qa-atomic-save.err 2>/dev/null || true)"
+
+  wait "$watcher_pid"
+  watch_code=$?
+
+  content_code=1
+  source_content_code=1
+  wait_for_content "$source_layer_mount_path/$rel" "$final_content" "$WAIT_LONG_ATTEMPTS" && source_content_code=0
+  wait_for_content "$watch_path/$rel" "$final_content" "$WAIT_LONG_ATTEMPTS" && content_code=0
+  set -e
+
+  if [ "$write_code" -eq 0 ] && [ "$source_content_code" -eq 0 ] && [ "$content_code" -eq 0 ] && [ "$watch_code" -eq 0 ]; then
+    printf "PASS | %s\n" "$name"
+    PASS=$((PASS + 1))
+  else
+    if is_env_mount_failure_output "$write_out"; then
+      printf "XFAIL | %s\n" "$name"
+      XFAIL=$((XFAIL + 1))
+    else
+      printf "FAIL | %s\n" "$name"
+      FAIL=$((FAIL + 1))
+    fi
+  fi
+
+  sed -n '1,4p' "$watch_file"
+  printf "write=%s\n" "$write_out"
+  printf "source-content=%s\n" "$(read_text_file_best_effort "$source_layer_mount_path/$rel")"
+  printf "watch-content=%s\n\n" "$(read_text_file_best_effort "$watch_path/$rel")"
+  rm -f "$watch_file" /tmp/spaces-qa-atomic-save.err
+}
+
+run_same_layer_shape_replace_case() {
+  name="$1"
+  source_layer_mount_path="$2"
+  watch_path="$3"
+  rel="$4"
+  mode="$5"
+  expected_rel="$6"
+  expected="$7"
+  watch_file="$(mktemp /tmp/spaces-qa-watch.XXXXXX)"
+
+  set +e
+  env -u NODE_OPTIONS node -e '
+const fs = require("fs");
+const root = process.argv[1];
+const timeoutMs = Number(process.argv[2] || "4000");
+let done = false;
+const timer = setTimeout(() => {
+  if (!done) {
+    done = true;
+    console.error("watch-timeout");
+    process.exit(1);
+  }
+}, timeoutMs);
+const watcher = fs.watch(root, { recursive: true }, (eventType, filename) => {
+  if (done) return;
+  done = true;
+  clearTimeout(timer);
+  watcher.close();
+  console.log(`watch-event ${eventType} ${String(filename || "")}`);
+  process.exit(0);
+});
+  ' "$watch_path" "$WATCH_TIMEOUT_REPLAY_MS" > "$watch_file" 2>&1 &
+  watcher_pid=$!
+  sleep "$WATCHER_READY_DELAY_SECONDS"
+
+  env -u NODE_OPTIONS node -e '
+const fs = require("fs");
+const path = require("path");
+const root = process.argv[1];
+const rel = process.argv[2];
+const mode = process.argv[3];
+const expectedRel = process.argv[4];
+const expected = process.argv[5];
+const target = path.join(root, rel);
+const expectedTarget = path.join(root, expectedRel);
+if (mode === "file-to-dir") {
+  fs.rmSync(target, { force: true, recursive: true });
+  fs.mkdirSync(target, { recursive: true });
+  fs.writeFileSync(expectedTarget, expected);
+} else {
+  fs.rmSync(target, { force: true, recursive: true });
+  fs.writeFileSync(target, expected);
+}
+  ' "$source_layer_mount_path" "$rel" "$mode" "$expected_rel" "$expected" >/tmp/spaces-qa-shape.err 2>&1
+  op_code=$?
+  op_out="$(cat /tmp/spaces-qa-shape.err 2>/dev/null || true)"
+
+  wait "$watcher_pid"
+  watch_code=$?
+
+  content_code=1
+  source_content_code=1
+  wait_for_content "$source_layer_mount_path/$expected_rel" "$expected" "$WAIT_LONG_ATTEMPTS" && source_content_code=0
+  wait_for_content "$watch_path/$expected_rel" "$expected" "$WAIT_LONG_ATTEMPTS" && content_code=0
+  set -e
+
+  if [ "$op_code" -eq 0 ] && [ "$source_content_code" -eq 0 ] && [ "$content_code" -eq 0 ] && [ "$watch_code" -eq 0 ]; then
+    printf "PASS | %s\n" "$name"
+    PASS=$((PASS + 1))
+  else
+    if is_env_mount_failure_output "$op_out"; then
+      printf "XFAIL | %s\n" "$name"
+      XFAIL=$((XFAIL + 1))
+    else
+      printf "FAIL | %s\n" "$name"
+      FAIL=$((FAIL + 1))
+    fi
+  fi
+
+  sed -n '1,4p' "$watch_file"
+  printf "op=%s\n" "$op_out"
+  printf "source-content=%s\n" "$(read_text_file_best_effort "$source_layer_mount_path/$expected_rel")"
+  printf "watch-content=%s\n\n" "$(read_text_file_best_effort "$watch_path/$expected_rel")"
+  rm -f "$watch_file" /tmp/spaces-qa-shape.err
+}
+
+run_nonempty_inherited_rmdir_case() {
+  name="$1"
+  source_mount_path="$2"
+  watch_path="$3"
+  relative="$4"
+  child_relative="$5"
+
+  set +e
+  wait_for_content "$source_mount_path/$child_relative" "child" "$WAIT_LONG_ATTEMPTS"
+  source_baseline=$?
+  wait_for_content "$watch_path/$child_relative" "child" "$WAIT_LONG_ATTEMPTS"
+  watch_baseline=$?
+  rmdir "$source_mount_path/$relative" >/tmp/spaces-qa-rmdir.err 2>&1
+  rmdir_code=$?
+  rmdir_out="$(cat /tmp/spaces-qa-rmdir.err 2>/dev/null || true)"
+  wait_for_content "$source_mount_path/$child_relative" "child" "$WAIT_SHORT_ATTEMPTS"
+  source_still=$?
+  wait_for_content "$watch_path/$child_relative" "child" "$WAIT_SHORT_ATTEMPTS"
+  watch_still=$?
+  set -e
+
+  if [ "$source_baseline" -eq 0 ] &&
+    [ "$watch_baseline" -eq 0 ] &&
+    [ "$rmdir_code" -ne 0 ] &&
+    [ "$source_still" -eq 0 ] &&
+    [ "$watch_still" -eq 0 ]; then
+    printf "PASS | %s\n" "$name"
+    PASS=$((PASS + 1))
+  else
+    if is_env_mount_failure_output "$rmdir_out"; then
+      printf "XFAIL | %s\n" "$name"
+      XFAIL=$((XFAIL + 1))
+    else
+      printf "FAIL | %s\n" "$name"
+      FAIL=$((FAIL + 1))
+    fi
+  fi
+
+  printf "rmdir-code=%s\n" "$rmdir_code"
+  printf "rmdir=%s\n" "$rmdir_out"
+  printf "source-child=%s\n" "$(read_text_file_best_effort "$source_mount_path/$child_relative")"
+  printf "watch-child=%s\n\n" "$(read_text_file_best_effort "$watch_path/$child_relative")"
+  rm -f /tmp/spaces-qa-rmdir.err
+}
+
+run_overlay_symlink_rename_case() {
+  name="$1"
+  source_mount_path="$2"
+  watch_path="$3"
+  old_rel="$4"
+  new_rel="$5"
+  expected_target="$6"
+  watch_file="$(mktemp /tmp/spaces-qa-watch.XXXXXX)"
+
+  set +e
+  env -u NODE_OPTIONS node -e '
+const fs = require("fs");
+const root = process.argv[1];
+const timeoutMs = Number(process.argv[2] || "4000");
+let done = false;
+const timer = setTimeout(() => {
+  if (!done) {
+    done = true;
+    console.error("watch-timeout");
+    process.exit(1);
+  }
+}, timeoutMs);
+const watcher = fs.watch(root, { recursive: true }, (eventType, filename) => {
+  if (done) return;
+  done = true;
+  clearTimeout(timer);
+  watcher.close();
+  console.log(`watch-event ${eventType} ${String(filename || "")}`);
+  process.exit(0);
+});
+  ' "$watch_path" "$WATCH_TIMEOUT_REPLAY_MS" > "$watch_file" 2>&1 &
+  watcher_pid=$!
+  sleep "$WATCHER_READY_DELAY_SECONDS"
+
+  mv "$source_mount_path/$old_rel" "$source_mount_path/$new_rel" >/tmp/spaces-qa-symlink-rename.err 2>&1
+  rename_code=$?
+  rename_out="$(cat /tmp/spaces-qa-symlink-rename.err 2>/dev/null || true)"
+
+  wait "$watcher_pid"
+  watch_code=$?
+
+  old_source_absent=1
+  old_watch_absent=1
+  wait_for_absent "$source_mount_path/$old_rel" "$WAIT_LONG_ATTEMPTS" && old_source_absent=0
+  wait_for_absent "$watch_path/$old_rel" "$WAIT_LONG_ATTEMPTS" && old_watch_absent=0
+  source_target="$(readlink "$source_mount_path/$new_rel" 2>/dev/null || true)"
+  watch_target="$(readlink "$watch_path/$new_rel" 2>/dev/null || true)"
+  set -e
+
+  if [ "$rename_code" -eq 0 ] &&
+    [ "$old_source_absent" -eq 0 ] &&
+    [ "$old_watch_absent" -eq 0 ] &&
+    [ "$source_target" = "$expected_target" ] &&
+    [ "$watch_target" = "$expected_target" ] &&
+    [ "$watch_code" -eq 0 ]; then
+    printf "PASS | %s\n" "$name"
+    PASS=$((PASS + 1))
+  else
+    if is_env_mount_failure_output "$rename_out"; then
+      printf "XFAIL | %s\n" "$name"
+      XFAIL=$((XFAIL + 1))
+    else
+      printf "FAIL | %s\n" "$name"
+      FAIL=$((FAIL + 1))
+    fi
+  fi
+
+  sed -n '1,4p' "$watch_file"
+  printf "rename=%s\n" "$rename_out"
+  printf "old-source-exists=%s\n" "$(path_exists_best_effort "$source_mount_path/$old_rel")"
+  printf "old-watch-exists=%s\n" "$(path_exists_best_effort "$watch_path/$old_rel")"
+  printf "source-target=%s\n" "$source_target"
+  printf "watch-target=%s\n\n" "$watch_target"
+  rm -f "$watch_file" /tmp/spaces-qa-symlink-rename.err
+}
+
+run_no_synthetic_files_case() {
+  name="$1"
+  mount_path="$2"
+
+  set +e
+  found="$(env -u NODE_OPTIONS node -e '
+const fs = require("fs");
+const root = process.argv[1];
+const matches = [];
+function walk(dir, depth) {
+  if (depth > 5) return;
+  let entries = [];
+  try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+  for (const entry of entries) {
+    const full = `${dir}/${entry.name}`;
+    if (entry.name.startsWith(".spaces-reload-pulse.") || entry.name.endsWith(".spaces-rename-notify")) {
+      matches.push(full.slice(root.length + 1));
+    }
+    if (entry.isDirectory()) walk(full, depth + 1);
+  }
+}
+walk(root, 0);
+process.stdout.write(matches.join("\n"));
+process.exit(matches.length === 0 ? 0 : 1);
+  ' "$mount_path" 2>/tmp/spaces-qa-synthetic.err)"
+  code=$?
+  err="$(cat /tmp/spaces-qa-synthetic.err 2>/dev/null || true)"
+  set -e
+
+  if [ "$code" -eq 0 ]; then
+    printf "PASS | %s\n" "$name"
+    PASS=$((PASS + 1))
+  else
+    printf "FAIL | %s\n" "$name"
+    FAIL=$((FAIL + 1))
+  fi
+  printf "found=%s\n" "$found"
+  printf "err=%s\n\n" "$err"
+  rm -f /tmp/spaces-qa-synthetic.err
+}
+
 run_overlay_delete_case() {
   name="$1"
   source_mount_path="$2"
@@ -1081,6 +1436,7 @@ CHILD2_ID=""
 CHILD2_MOUNT_PATH=""
 if [ -n "$MOUNT_ID" ]; then
   run_case_expect_fail "mount delete requires --force in non-interactive mode" "Refusing destructive action in non-interactive mode|--force" sh -lc "$CMD mount delete '$MOUNT_ID' --json"
+  run_readlink_case "mounted view exposes broken entrypoint symlink" "$MOUNTDIR/broken-link" "missing-target"
   run_case_expect_fail "entrypoint create rejects unknown flag" "Unknown option\\(s\\): --bogus" sh -lc "$CMD entrypoint create --path '$ENTRY' --name qa-bad --bogus nope --json"
   if [ -n "$EP_ID" ]; then
     run_case_expect_fail "layer create rejects unknown flag" "Unknown option\\(s\\): --bogus" sh -lc "$CMD layer create --entrypoint '$EP_ID' --name qa-bad-layer --bogus nope --json"
@@ -1122,8 +1478,12 @@ if [ -n "$MOUNT_ID" ]; then
   if [ -n "$LAYER2_UPPER_DIR" ]; then
     mkdir -p "$LAYER2_UPPER_DIR" || true
     printf "layer-two\n" > "$LAYER2_UPPER_DIR/hot-switch.txt" || true
+    printf "atomic-initial" > "$LAYER2_UPPER_DIR/atomic-save.txt" || true
     printf "added-two\n" > "$LAYER2_UPPER_DIR/delta-added.txt" || true
     printf "renamed-two\n" > "$LAYER2_UPPER_DIR/delta-renamed-new.txt" || true
+    printf "shape-initial" > "$LAYER2_UPPER_DIR/shape-file" || true
+    mkdir -p "$LAYER2_UPPER_DIR/shape-dir" || true
+    printf "shape-dir-initial" > "$LAYER2_UPPER_DIR/shape-dir/nested.txt" || true
     mkdir -p "$LAYER2_UPPER_DIR/nested/deep" || true
     printf "deep-two\n" > "$LAYER2_UPPER_DIR/nested/deep/file.txt" || true
     mkdir -p "$LAYER2_UPPER_DIR/src" || true
@@ -1144,6 +1504,7 @@ if [ -n "$MOUNT_ID" ]; then
       run_case "mount attach layer2 baseline for same-layer vite edit case" 0 sh -lc "$CMD mount attach '$MOUNT_ID' '$LAYER2_ID' --json"
       run_case "layer2 mount ensure for same-layer vite edit case" 1 sh -lc "$CMD layer mount '$LAYER2_ID' --json"
       run_vite_same_layer_edit_case "vite dev server reloads after same-layer file edit through layer mount" "$LAYER2_MOUNT_PATH" "$MOUNTDIR" "src/message.js" "layer-two-vite" "layer-two-vite-live"
+      run_same_layer_atomic_save_case "same-layer atomic save wakes watcher and updates content" "$LAYER2_MOUNT_PATH" "$MOUNTDIR" "atomic-save.txt" "atomic-initial" "atomic-final"
     fi
   fi
 
@@ -1248,11 +1609,14 @@ if [ -n "$MOUNT_ID" ]; then
     mkdir -p "$PARENT1_UPPER_DIR" || true
     printf "parent-one\n" > "$PARENT1_UPPER_DIR/parent-switch.txt" || true
     printf "delete-me\n" > "$PARENT1_UPPER_DIR/inherited-delete.txt" || true
+    mkdir -p "$PARENT1_UPPER_DIR/inherited-nonempty-dir" || true
+    printf "child" > "$PARENT1_UPPER_DIR/inherited-nonempty-dir/child.txt" || true
   fi
   if [ -n "$PARENT2_UPPER_DIR" ]; then
     mkdir -p "$PARENT2_UPPER_DIR" || true
     printf "parent-two\n" > "$PARENT2_UPPER_DIR/parent-switch.txt" || true
     printf "rename-me\n" > "$PARENT2_UPPER_DIR/inherited-rename-old.txt" || true
+    ln -s symlink-target "$PARENT2_UPPER_DIR/inherited-symlink-old" || true
   fi
   if [ -n "$CHILD1_ID" ] && [ -n "$CHILD2_ID" ]; then
     run_case "mount attach parent child-a baseline" 0 sh -lc "$CMD mount attach '$MOUNT_ID' '$CHILD1_ID' --json"
@@ -1260,11 +1624,14 @@ if [ -n "$MOUNT_ID" ]; then
   fi
   if [ -n "$CHILD1_ID" ] && [ -n "$CHILD1_MOUNT_PATH" ]; then
     run_case "mount attach parent child-a baseline for inherited delete" 0 sh -lc "$CMD mount attach '$MOUNT_ID' '$CHILD1_ID' --json"
+    run_nonempty_inherited_rmdir_case "child layer rmdir rejects non-empty inherited directory" "$CHILD1_MOUNT_PATH" "$MOUNTDIR" "inherited-nonempty-dir" "inherited-nonempty-dir/child.txt"
     run_overlay_delete_case "child layer delete hides inherited parent file and updates user mount" "$CHILD1_MOUNT_PATH" "$MOUNTDIR" "inherited-delete.txt"
   fi
   if [ -n "$CHILD2_ID" ] && [ -n "$CHILD2_MOUNT_PATH" ]; then
     run_case "mount attach parent child-b baseline for inherited rename" 0 sh -lc "$CMD mount attach '$MOUNT_ID' '$CHILD2_ID' --json"
     run_overlay_rename_case "child layer rename hides inherited old path and updates user mount" "$CHILD2_MOUNT_PATH" "$MOUNTDIR" "inherited-rename-old.txt" "inherited-rename-new.txt" "rename-me"
+    run_overlay_symlink_rename_case "child layer rename preserves inherited symlink and wakes user mount" "$CHILD2_MOUNT_PATH" "$MOUNTDIR" "inherited-symlink-old" "inherited-symlink-new" "symlink-target"
+    run_no_synthetic_files_case "synthetic watcher files are transient" "$MOUNTDIR"
   fi
 
   EP2_JSON="$(sh -lc "$CMD entrypoint create --path '$ENTRY2' --name qa-entry-two --json" 2>/tmp/spaces-qa-entry2.err || true)"

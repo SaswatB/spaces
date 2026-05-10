@@ -916,8 +916,6 @@
           "id",
           "name",
           "entrypointId",
-          "upperDir",
-          "workDir",
           "mountPath",
           "createdAt",
           "updatedAt"
@@ -946,12 +944,6 @@
           "updatedAt": {
             "type": "string",
             "format": "date-time"
-          },
-          "upperDir": {
-            "type": "string"
-          },
-          "workDir": {
-            "type": "string"
           }
         }
       },
@@ -961,8 +953,6 @@
           "id",
           "name",
           "entrypointId",
-          "upperDir",
-          "workDir",
           "mountPath",
           "mountStatus",
           "createdAt",
@@ -1003,12 +993,6 @@
           "updatedAt": {
             "type": "string",
             "format": "date-time"
-          },
-          "upperDir": {
-            "type": "string"
-          },
-          "workDir": {
-            "type": "string"
           }
         }
       }

@@ -18,6 +18,7 @@ import kotlin.test.assertTrue
 import kotlin.test.fail
 import org.dcache.nfs.status.ExistException
 import org.dcache.nfs.status.NoEntException
+import org.dcache.nfs.status.NotEmptyException
 import org.dcache.nfs.v4.xdr.nfs4_prot
 import org.dcache.nfs.v4.xdr.stateid4
 import org.dcache.nfs.vfs.Inode
@@ -107,10 +108,89 @@ class DaemonOverlayTest {
         env.writeUserMountFile("mirror", "dir/stale.txt", "stale")
         env.writeUserMountFile("mirror", "dir/keep.txt", "old")
 
-        env.vfs.replay("child", "mirror", NfsOp("child", "dir", NfsOpKind.Mkdir))
+        env.vfs.replay("child", "mirror", ViewChange.DirectoryConverged("dir"))
 
         assertEquals("fresh", (env.userMountPath("mirror") / "dir/keep.txt").readText())
         assertFalse((env.userMountPath("mirror") / "dir/stale.txt").exists())
+    }
+
+    @Test
+    fun sameLayerAttachedMountInvalidationDoesNotMaterializeContent() = withTestEnv { env ->
+        env.writeLayerFile("child", "same-layer.txt", "fresh")
+
+        env.replication.handleOp(NfsOp("child", "same-layer.txt", NfsOpKind.Write))
+        assertTrue(env.replication.awaitIdle(5_000))
+
+        assertFalse((env.userMountPath("mount") / "same-layer.txt").exists())
+    }
+
+    @Test
+    fun removingNonEmptyInheritedDirectoryFails() = withTestEnv { env ->
+        (env.entrypointRoot / "docs").createDirectories()
+        env.writeEntrypointFile("docs/readme.md", "base")
+        val layerRoot = env.layerRoot("child")
+
+        assertFailsWith<NotEmptyException> { env.vfs.remove(layerRoot, "docs") }
+
+        assertTrue(env.readVisibleFile(env.vfs.lookup(layerRoot, "docs"), "readme.md") == "base")
+        assertFalse((env.layerUpper("child") / ".wh.docs").exists())
+    }
+
+    @Test
+    fun removingEmptyInheritedDirectoryCreatesWhiteout() = withTestEnv { env ->
+        (env.entrypointRoot / "empty-dir").createDirectories()
+        val layerRoot = env.layerRoot("child")
+
+        env.vfs.remove(layerRoot, "empty-dir")
+
+        assertTrue((env.layerUpper("child") / ".wh.empty-dir").exists())
+        assertLookupMissing(layerRoot, "empty-dir", env.vfs)
+    }
+
+    @Test
+    fun brokenInheritedSymlinkIsVisible() = withTestEnv { env ->
+        Files.createSymbolicLink(env.entrypointRoot / "broken-link", Path.of("missing-target"))
+        val layerRoot = env.layerRoot("child")
+
+        val inode = env.vfs.lookup(layerRoot, "broken-link")
+
+        assertEquals("missing-target", env.vfs.readlink(inode))
+    }
+
+    @Test
+    fun renamingInheritedSymlinkPreservesSymlink() = withTestEnv { env ->
+        Files.createSymbolicLink(env.entrypointRoot / "link", Path.of("target.txt"))
+        val layerRoot = env.layerRoot("child")
+
+        env.vfs.move(layerRoot, "link", layerRoot, "renamed-link")
+
+        val renamed = env.layerUpper("child") / "renamed-link"
+        assertTrue(Files.isSymbolicLink(renamed))
+        assertEquals("target.txt", Files.readSymbolicLink(renamed).toString())
+        assertTrue((env.layerUpper("child") / ".wh.link").exists())
+    }
+
+    @Test
+    fun replayDirectoryViewReplacesFileWithDirectory() = withTestEnv { env ->
+        env.writeLayerFile("child", "shape/nested.txt", "fresh")
+        env.writeUserMountFile("mirror", "shape", "old-file")
+
+        env.vfs.replay("child", "mirror", ViewChange.DirectoryConverged(""))
+
+        assertTrue(Files.isDirectory(env.userMountPath("mirror") / "shape"))
+        assertEquals("fresh", (env.userMountPath("mirror") / "shape/nested.txt").readText())
+    }
+
+    @Test
+    fun replayUpsertReplacesDirectoryWithFile() = withTestEnv { env ->
+        env.writeLayerFile("child", "shape", "fresh-file")
+        (env.userMountPath("mirror") / "shape").createDirectories()
+        env.writeUserMountFile("mirror", "shape/stale.txt", "stale")
+
+        env.vfs.replay("child", "mirror", ViewChange.PathUpsert("shape"))
+
+        assertFalse(Files.isDirectory(env.userMountPath("mirror") / "shape"))
+        assertEquals("fresh-file", (env.userMountPath("mirror") / "shape").readText())
     }
 
     @Test
@@ -359,9 +439,6 @@ private class TestEnv(root: Path) {
     }
 
     private fun insertUserMount(id: String, entrypointId: String, layerId: String?): UserMountRecord {
-        val root = dataDir / "usermounts" / id
-        Files.createDirectories(root / "upper")
-        Files.createDirectories(root / "work")
         Files.createDirectories(dataDir / "mounts" / id)
         val record =
                 UserMountRecord(
@@ -370,8 +447,6 @@ private class TestEnv(root: Path) {
                         entrypointId = entrypointId,
                         attachedLayerId = layerId,
                         generation = 0,
-                        upperDir = (root / "upper").toString(),
-                        workDir = (root / "work").toString(),
                         mountPath = (dataDir / "mounts" / id).toString(),
                         createdAt = 0,
                         updatedAt = 0

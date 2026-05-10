@@ -5,8 +5,6 @@ import java.nio.file.*
 import java.nio.file.attribute.BasicFileAttributes
 import java.nio.file.attribute.PosixFileAttributeView
 import java.nio.file.attribute.PosixFileAttributes
-import kotlin.io.path.exists
-import kotlin.io.path.isDirectory
 import kotlin.io.path.name
 import kotlin.io.path.writeBytes
 
@@ -56,7 +54,7 @@ class OverlayEngine {
         val rel = relative
         for (layer in layers) {
             val candidate = layer.resolve(rel)
-            if (candidate.exists()) {
+            if (existsNoFollow(candidate)) {
                 return ResolvedPath(candidate)
             }
             if (isWhiteoutedInLayer(layer, rel) || isOpaqueParentInLayer(layer, rel)) {
@@ -64,7 +62,7 @@ class OverlayEngine {
             }
         }
         val lower = entrypoint.resolve(rel)
-        return if (lower.exists()) ResolvedPath(lower) else null
+        return if (existsNoFollow(lower)) ResolvedPath(lower) else null
     }
 
     fun listDir(view: OverlayView, relative: String): List<String> {
@@ -74,7 +72,7 @@ class OverlayEngine {
 
         for (layer in view.layers) {
             val dir = layer.resolve(rel)
-            if (!dir.exists()) continue
+            if (!existsNoFollow(dir)) continue
             var opaqueHere = false
             try {
                 Files.newDirectoryStream(dir).use { stream ->
@@ -103,7 +101,7 @@ class OverlayEngine {
         }
 
         val lowerDir = view.entrypoint.resolve(rel)
-        if (lowerDir.exists()) {
+        if (existsNoFollow(lowerDir)) {
             try {
                 Files.newDirectoryStream(lowerDir).use { stream ->
                     for (entry in stream) {
@@ -125,14 +123,17 @@ class OverlayEngine {
         val rel = Paths.get(relative)
         val topUpper = view.layers.firstOrNull() ?: return
         val upperPath = topUpper.resolve(rel)
-        if (upperPath.exists()) return
+        if (existsNoFollow(upperPath)) return
 
         val lowerPath = resolveLowerPath(view, rel)?.source ?: return
 
-        if (lowerPath.isDirectory()) {
+        if (Files.isDirectory(lowerPath, LinkOption.NOFOLLOW_LINKS)) {
             ensureParentDirs(view, rel)
             Files.createDirectories(upperPath)
             applyMetadata(upperPath, lowerPath)
+        } else if (Files.isSymbolicLink(lowerPath)) {
+            ensureParentDirs(view, rel)
+            Files.createSymbolicLink(upperPath, Files.readSymbolicLink(lowerPath))
         } else {
             ensureParentDirs(view, rel)
             Files.copy(lowerPath, upperPath)
@@ -149,10 +150,10 @@ class OverlayEngine {
         parent.forEach { component ->
             current = current.resolve(component)
             val upperDir = topUpper.resolve(current)
-            if (upperDir.exists()) return@forEach
+            if (existsNoFollow(upperDir)) return@forEach
             val metaSource = resolveLowerPath(view, current)?.source
             Files.createDirectories(upperDir)
-            if (metaSource != null && metaSource.isDirectory()) {
+            if (metaSource != null && Files.isDirectory(metaSource, LinkOption.NOFOLLOW_LINKS)) {
                 applyMetadata(upperDir, metaSource)
             }
         }
@@ -174,7 +175,7 @@ class OverlayEngine {
         val name = rel.fileName?.toString() ?: return
         val marker = topUpper.resolve(parent).resolve(markerName(name))
         Files.createDirectories(marker.parent)
-        if (!marker.exists()) {
+        if (!existsNoFollow(marker)) {
             marker.writeBytes(byteArrayOf())
             applyOwnerFromPath(view.entrypoint, marker)
         }
@@ -185,7 +186,7 @@ class OverlayEngine {
         val topUpper = view.layers.firstOrNull() ?: return
         val marker = topUpper.resolve(rel).resolve(OPAQUE_MARKER)
         Files.createDirectories(marker.parent)
-        if (!marker.exists()) {
+        if (!existsNoFollow(marker)) {
             marker.writeBytes(byteArrayOf())
             applyOwnerFromPath(view.entrypoint, marker)
         }
@@ -199,7 +200,7 @@ class OverlayEngine {
             current = current.resolve(component)
             val dir = layer.resolve(current)
             val opaque = dir.resolve(OPAQUE_MARKER)
-            if (opaque.exists()) {
+            if (existsNoFollow(opaque)) {
                 return true
             }
         }
@@ -210,14 +211,14 @@ class OverlayEngine {
         val parent = relative.parent ?: Paths.get("")
         val name = relative.fileName?.toString() ?: return false
         val marker = layer.resolve(parent).resolve(markerName(name))
-        return marker.exists()
+        return existsNoFollow(marker)
     }
 
     private fun applyMetadata(target: Path, source: Path) {
-        val attrs = Files.readAttributes(source, BasicFileAttributes::class.java)
+        val attrs = Files.readAttributes(source, BasicFileAttributes::class.java, LinkOption.NOFOLLOW_LINKS)
         val perms =
                 try {
-                    Files.getPosixFilePermissions(source)
+                    Files.getPosixFilePermissions(source, LinkOption.NOFOLLOW_LINKS)
                 } catch (_: Exception) {
                     null
                 }
@@ -226,7 +227,7 @@ class OverlayEngine {
         }
         val ownerAttrs =
                 try {
-                    Files.readAttributes(source, PosixFileAttributes::class.java)
+                    Files.readAttributes(source, PosixFileAttributes::class.java, LinkOption.NOFOLLOW_LINKS)
                 } catch (_: Exception) {
                     null
                 }
@@ -248,4 +249,7 @@ class OverlayEngine {
             view.setGroup(attrs.group())
         }
     }
+
+    private fun existsNoFollow(path: Path): Boolean =
+            Files.exists(path, LinkOption.NOFOLLOW_LINKS)
 }

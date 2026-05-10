@@ -155,10 +155,6 @@ class SpacesService(
         }
         val now = nowSeconds()
         val id = generateUserMountId()
-        val upperDir = "${config.dataDir}/usermounts/$id/upper"
-        val workDir = "${config.dataDir}/usermounts/$id/work"
-        Files.createDirectories(Paths.get(upperDir))
-        Files.createDirectories(Paths.get(workDir))
         Files.createDirectories(Paths.get(mountPath))
         val record =
                 UserMountRecord(
@@ -167,8 +163,6 @@ class SpacesService(
                         entrypointId = entrypointId,
                         attachedLayerId = attachedLayerId,
                         generation = 0,
-                        upperDir = upperDir,
-                        workDir = workDir,
                         mountPath = mountPath,
                         createdAt = now,
                         updatedAt = now
@@ -403,8 +397,6 @@ class SpacesService(
                     name = name,
                     entrypointId = entrypointId,
                     attachedLayerId = attachedLayerId,
-                    upperDir = upperDir,
-                    workDir = workDir,
                     mountPath = mountPath,
                     mountStatus = status,
                     createdAt = Instant.ofEpochSecond(createdAt).toString(),

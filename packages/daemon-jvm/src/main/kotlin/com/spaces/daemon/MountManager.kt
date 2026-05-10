@@ -40,10 +40,22 @@ class MountManager(
 
         Files.createDirectories(Paths.get(localPath))
         val options =
-                listOf("vers=4", "tcp", "port=${config.nfsPort}", "soft", "timeo=10", "retrans=2")
+                listOf(
+                                "vers=4",
+                                "tcp",
+                                "port=${config.nfsPort}",
+                                "soft",
+                                "timeo=10",
+                                "retrans=2",
+                                "noac",
+                                "nonegnamecache"
+                        )
                         .joinToString(",")
         val result =
-                runCommand(listOf("mount_nfs", "-o", options, expectedSource, localPath), 20.seconds)
+                runCommand(
+                        listOf("mount_nfs", "-o", options, expectedSource, localPath),
+                        20.seconds
+                )
         if (result.exitCode != 0)
                 throw IOException("mount_nfs failed for $localPath: ${result.stderr}")
         if (mountedSource(localPath) != expectedSource)

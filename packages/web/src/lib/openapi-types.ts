@@ -341,8 +341,6 @@ export interface components {
             name: string;
             /** Format: date-time */
             updatedAt: string;
-            upperDir: string;
-            workDir: string;
         };
         UserMountResponse: {
             attachedLayerId?: string | null;
@@ -356,8 +354,6 @@ export interface components {
             syncState?: components["schemas"]["SyncState"] | null;
             /** Format: date-time */
             updatedAt: string;
-            upperDir: string;
-            workDir: string;
         };
     };
     responses: never;
