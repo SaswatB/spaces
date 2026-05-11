@@ -913,7 +913,7 @@ function walk(dir, depth) {
   try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
   for (const entry of entries) {
     const full = `${dir}/${entry.name}`;
-    if (entry.name.startsWith(".spaces-reload-pulse.") || entry.name.endsWith(".spaces-rename-notify")) {
+    if (entry.name.startsWith(".spaces-")) {
       matches.push(full.slice(root.length + 1));
     }
     if (entry.isDirectory()) walk(full, depth + 1);
@@ -1631,7 +1631,7 @@ if [ -n "$MOUNT_ID" ]; then
     run_case "mount attach parent child-b baseline for inherited rename" 0 sh -lc "$CMD mount attach '$MOUNT_ID' '$CHILD2_ID' --json"
     run_overlay_rename_case "child layer rename hides inherited old path and updates user mount" "$CHILD2_MOUNT_PATH" "$MOUNTDIR" "inherited-rename-old.txt" "inherited-rename-new.txt" "rename-me"
     run_overlay_symlink_rename_case "child layer rename preserves inherited symlink and wakes user mount" "$CHILD2_MOUNT_PATH" "$MOUNTDIR" "inherited-symlink-old" "inherited-symlink-new" "symlink-target"
-    run_no_synthetic_files_case "synthetic watcher files are transient" "$MOUNTDIR"
+    run_no_synthetic_files_case "no spaces marker files are generated" "$MOUNTDIR"
   fi
 
   EP2_JSON="$(sh -lc "$CMD entrypoint create --path '$ENTRY2' --name qa-entry-two --json" 2>/tmp/spaces-qa-entry2.err || true)"

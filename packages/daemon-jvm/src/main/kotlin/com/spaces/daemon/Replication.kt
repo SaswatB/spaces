@@ -398,8 +398,6 @@ class ReplicationService(
         return parts.any { part ->
             part.startsWith("._") ||
                     part.startsWith(".nfs") ||
-                    part.startsWith(".spaces-reload-pulse.") ||
-                    part.endsWith(".spaces-rename-notify") ||
                     part == ".DS_Store"
         }
     }

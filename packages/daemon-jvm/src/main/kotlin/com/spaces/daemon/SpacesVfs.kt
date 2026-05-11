@@ -12,7 +12,6 @@ import java.nio.file.attribute.PosixFilePermission
 import java.nio.file.attribute.PosixFilePermissions
 import java.security.MessageDigest
 import java.time.Instant
-import java.util.UUID
 import java.util.Base64
 import java.util.concurrent.ConcurrentHashMap
 import javax.security.auth.Subject
@@ -1108,11 +1107,10 @@ class SpacesVfs(private val db: SpacesDatabase) : VirtualFileSystem {
                     }
 
             if (changed.isNotEmpty()) {
-                // Avoid touching real files through NFS here: setattr can copy-up and pin old content
-                // into the user-mount upper, which breaks attach semantics. Emit a transient pulse
-                // event at mount root to wake recursive watchers without mutating user content.
-                PerfStats.timed("layer_switch.invalidate.emit_pulse") {
-                    emitSwitchPulseEvent(mountRoot)
+                // Nudge only the mounted root here. Touching visible child files through NFS can
+                // copy-up stale content into the wrong upper during attach switches.
+                PerfStats.timed("layer_switch.invalidate.nudge_root") {
+                    nudgeVisiblePath(mountRoot)
                 }
             }
         }
@@ -1206,31 +1204,9 @@ class SpacesVfs(private val db: SpacesDatabase) : VirtualFileSystem {
         }
     }
 
-    private fun emitSwitchPulseEvent(mountRoot: Path) {
-        if (!Files.exists(mountRoot)) return
-        emitPulseFile(mountRoot, mountRoot.resolve(".spaces-reload-pulse.${UUID.randomUUID()}"))
-    }
-
-    private fun emitPulseFile(mountRoot: Path, pulse: Path) {
-        runCatching {
-                    Files.writeString(
-                            pulse,
-                            Instant.now().toEpochMilli().toString(),
-                            StandardOpenOption.CREATE_NEW,
-                            StandardOpenOption.WRITE
-                    )
-                    Files.deleteIfExists(pulse)
-                }
-                .onFailure { error ->
-                    logger.debug("Failed to emit layer-switch pulse event at {}", mountRoot, error)
-                }
-    }
-
     private fun isIgnoredInvalidationName(name: String): Boolean {
         if (name.startsWith("._")) return true
         if (name.startsWith(".nfs")) return true
-        if (name.startsWith(".spaces-reload-pulse.")) return true
-        if (name.endsWith(".spaces-rename-notify")) return true
         if (name == ".DS_Store") return true
         return false
     }
@@ -1287,13 +1263,11 @@ class SpacesVfs(private val db: SpacesDatabase) : VirtualFileSystem {
                 is ViewChange.ViewInvalidated -> {
                     invalidateVisiblePath(root, change.relativePath, preferParent = false)
                     change.targetRelativePath?.let { target ->
-                        if (change.rename && !notifyRenameVisiblePath(root, target)) {
-                            invalidateVisiblePath(root, target, preferParent = false)
-                        }
+                        invalidateVisiblePath(root, parentRelativePath(target), preferParent = false)
+                        invalidateVisiblePath(root, target, preferParent = false)
                     }
                 }
             }
-            emitSwitchPulseEvent(root)
         }
     }
 
@@ -1348,7 +1322,7 @@ class SpacesVfs(private val db: SpacesDatabase) : VirtualFileSystem {
                     !preferParent && candidate != null && Files.exists(candidate) -> candidate
                     else -> nearestExistingDirectory(targetRoot, candidate?.parent ?: targetRoot)
                 } ?: targetRoot
-        touchVisiblePath(target)
+        nudgeVisiblePath(target)
     }
 
     private fun normalizedTargetPath(targetRoot: Path, relative: String): Path? {
@@ -1369,41 +1343,28 @@ class SpacesVfs(private val db: SpacesDatabase) : VirtualFileSystem {
         return if (Files.exists(targetRoot) && Files.isDirectory(targetRoot)) targetRoot else null
     }
 
-    private fun touchVisiblePath(target: Path): Boolean {
+    private fun nudgeVisiblePath(target: Path): Boolean {
         return runCatching {
                     if (!Files.exists(target)) return false
                     if (Files.isSymbolicLink(target)) {
                         val parent = target.parent
                         if (parent == null || !Files.exists(parent)) return false
-                        Files.setLastModifiedTime(parent, FileTime.from(Instant.now()))
+                        nudgeExistingPath(parent)
                     } else {
-                        Files.setLastModifiedTime(target, FileTime.from(Instant.now()))
+                        nudgeExistingPath(target)
                     }
                     true
                 }
                 .getOrElse { false }
     }
 
-    private fun notifyRenameVisiblePath(targetRoot: Path, relative: String): Boolean {
-        if (relative.isBlank()) return false
-        val target = normalizedTargetPath(targetRoot, relative) ?: return false
-        if (!Files.exists(target)) return false
-        val scratch = normalizedTargetPath(targetRoot, renameScratchRelativePath(relative)) ?: return false
-        return runCatching {
-                    scratch.parent?.let { Files.createDirectories(it) }
-                    Files.deleteIfExists(scratch)
-                    Files.move(target, scratch, StandardCopyOption.REPLACE_EXISTING)
-                    Files.move(scratch, target, StandardCopyOption.REPLACE_EXISTING)
-                    deleteAppleDoubleSidecar(scratch)
-                    true
-                }
-                .getOrElse { false }
-    }
-
-    private fun deleteAppleDoubleSidecar(path: Path) {
-        val parent = path.parent ?: return
-        val sidecar = parent.resolve("._${path.fileName}")
-        runCatching { Files.deleteIfExists(sidecar) }
+    private fun nudgeExistingPath(target: Path) {
+        val permissions = runCatching { Files.getPosixFilePermissions(target) }.getOrNull()
+        if (permissions != null) {
+            runCatching { Files.setPosixFilePermissions(target, permissions) }
+                    .onSuccess { return }
+        }
+        Files.setLastModifiedTime(target, FileTime.from(Instant.now()))
     }
 
     private fun parentRelativePath(relativePath: String): String {
@@ -1412,15 +1373,6 @@ class SpacesVfs(private val db: SpacesDatabase) : VirtualFileSystem {
         if (normalized.isEmpty()) return ""
         val slashIndex = normalized.lastIndexOf('/')
         return if (slashIndex < 0) "" else normalized.substring(0, slashIndex)
-    }
-
-    private fun renameScratchRelativePath(relativePath: String): String {
-        val normalized = relativePath.trim('/')
-        if (normalized.isBlank()) return ".spaces-rename-notify"
-        val path = Paths.get(normalized)
-        val scratchName = ".${path.fileName}.spaces-rename-notify"
-        val parent = path.parent
-        return parent?.resolve(scratchName)?.toString() ?: scratchName
     }
 
     private fun replayDirectoryView(sourceMount: MountView, targetRoot: Path, relative: String) {
