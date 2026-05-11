@@ -14,6 +14,7 @@ import java.security.MessageDigest
 import java.time.Instant
 import java.util.Base64
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicLong
 import javax.security.auth.Subject
 import kotlin.io.path.exists
 import org.dcache.nfs.status.ExistException
@@ -44,6 +45,7 @@ class SpacesVfs(private val db: SpacesDatabase) : VirtualFileSystem {
     private val handleToPath = ConcurrentHashMap<String, HandleEntry>()
     private val handleToInode = ConcurrentHashMap<String, Inode>()
     private val openWriteHandles = ConcurrentHashMap<String, OpenHandle>()
+    private val pathGenerations = ConcurrentHashMap<String, AtomicLong>()
     @Volatile private var opHandler: ((NfsOp) -> Unit)? = null
 
     fun setOpHandler(handler: (NfsOp) -> Unit) {
@@ -562,7 +564,11 @@ class SpacesVfs(private val db: SpacesDatabase) : VirtualFileSystem {
                 NodeKind.LAYER_ROOT, NodeKind.MOUNT_ROOT -> {
                     val mount = resolved.mountView
                     if (mount != null) {
-                        virtualDirStat(resolved.path, mount.view.entrypoint)
+                        virtualDirStat(
+                                resolved.path,
+                                mount.view.entrypoint,
+                                pathGenerationFor(resolved.mountId, resolved.relativePath)
+                        )
                     } else {
                         dirStat(resolved.path)
                     }
@@ -572,7 +578,10 @@ class SpacesVfs(private val db: SpacesDatabase) : VirtualFileSystem {
                     val rel = resolved.relativePath
                     val resolvedPath =
                             overlay.resolvePath(mount.view, rel) ?: throw NoEntException()
-                    fileStat(resolvedPath.source)
+                    fileStat(
+                            resolvedPath.source,
+                            pathGenerationFor(resolved.mountId, resolved.relativePath)
+                    )
                 }
                 else -> dirStat(resolved.path)
             }
@@ -644,10 +653,21 @@ class SpacesVfs(private val db: SpacesDatabase) : VirtualFileSystem {
         val path =
                 if (relative.isBlank()) prefixPath("mounts/${mount.id}")
                 else prefixPath("mounts/${mount.id}/${relative.trimStart('/')}")
-        val handleBytes = hashBytes("mount:${mount.id}:generation:${mount.generation}:$relative")
+        val normalizedRelative = normalizeRelativePath(relative)
+        val pathGeneration = pathGenerationFor(mount.id, normalizedRelative)
+        val handleBytes =
+                hashBytes(
+                        "mount:${mount.id}:generation:${mount.generation}:pathGeneration:${pathGeneration}:$normalizedRelative"
+                )
         return inodeForHandle(
                 handleBytes,
-                HandleEntry(path = path, mountId = mount.id, mountGeneration = mount.generation)
+                HandleEntry(
+                        path = path,
+                        mountId = mount.id,
+                        mountGeneration = mount.generation,
+                        relativePath = normalizedRelative,
+                        pathGeneration = pathGeneration
+                )
         )
     }
 
@@ -663,9 +683,6 @@ class SpacesVfs(private val db: SpacesDatabase) : VirtualFileSystem {
     private fun inodeForMountPath(mount: MountView, relative: String, sourcePath: Path?): Inode {
         if (mount.mountGeneration == null) {
             return inodeForResolvedPath(prefixPath("layers/${mount.mountId}"), relative, sourcePath)
-        }
-        if (sourcePath == null || Files.isDirectory(sourcePath, LinkOption.NOFOLLOW_LINKS)) {
-            return inodeForVirtualPath(prefixPath("mounts/${mount.mountId}"), relative)
         }
         val mountRecord = db.getUserMount(mount.mountId)
                 ?: return inodeForResolvedPath(prefixPath("mounts/${mount.mountId}"), relative, sourcePath)
@@ -711,10 +728,10 @@ class SpacesVfs(private val db: SpacesDatabase) : VirtualFileSystem {
         return hashBytes("file:$key")
     }
 
-    private fun stableFileId(path: Path, followLinks: Boolean): Long {
+    private fun stableFileId(path: Path, followLinks: Boolean, pathGeneration: Long = 0): Long {
         val key =
                 stableKeyForPath(path, followLinks) ?: path.toAbsolutePath().normalize().toString()
-        return fileIdForKey("file:$key")
+        return fileIdForKey("file:$key:generation:$pathGeneration")
     }
 
     private fun stableKeyForPath(path: Path, followLinks: Boolean): String? {
@@ -878,7 +895,28 @@ class SpacesVfs(private val db: SpacesDatabase) : VirtualFileSystem {
     private fun isStaleMountHandle(mountId: String, entry: HandleEntry?): Boolean {
         val handleGeneration = entry?.mountGeneration ?: return false
         val currentGeneration = db.getUserMount(mountId)?.generation ?: return true
-        return handleGeneration != currentGeneration
+        if (handleGeneration != currentGeneration) return true
+        val relative = entry.relativePath ?: return false
+        val pathGeneration = entry.pathGeneration ?: return false
+        return pathGeneration != pathGenerationFor(mountId, relative)
+    }
+
+    private fun bumpPathGeneration(mountId: String, relative: String) {
+        pathGenerations.computeIfAbsent(pathGenerationKey(mountId, relative)) { AtomicLong(0) }
+                .incrementAndGet()
+    }
+
+    private fun pathGenerationFor(mountId: String?, relative: String): Long {
+        if (mountId == null) return 0
+        return pathGenerations[pathGenerationKey(mountId, relative)]?.get() ?: 0
+    }
+
+    private fun pathGenerationKey(mountId: String, relative: String): String {
+        return "$mountId:${normalizeRelativePath(relative)}"
+    }
+
+    private fun normalizeRelativePath(relative: String): String {
+        return relative.trim('/')
     }
 
     private fun ensureWritable(mount: MountView) {
@@ -927,7 +965,7 @@ class SpacesVfs(private val db: SpacesDatabase) : VirtualFileSystem {
         return stat
     }
 
-    private fun virtualDirStat(exportPath: String, source: Path): Stat {
+    private fun virtualDirStat(exportPath: String, source: Path, pathGeneration: Long = 0): Stat {
         val stat = Stat()
         val attrs =
                 Files.readAttributes(
@@ -943,12 +981,12 @@ class SpacesVfs(private val db: SpacesDatabase) : VirtualFileSystem {
         stat.setATime(attrs.lastAccessTime().toMillis())
         stat.setMTime(attrs.lastModifiedTime().toMillis())
         stat.setCTime(attrs.creationTime().toMillis())
-        stat.setFileid(fileIdForKey("virtual:$exportPath"))
-        stat.setGeneration(0)
+        stat.setFileid(fileIdForKey("virtual:$exportPath:generation:$pathGeneration"))
+        stat.setGeneration(pathGeneration)
         return stat
     }
 
-    private fun fileStat(path: Path): Stat {
+    private fun fileStat(path: Path, pathGeneration: Long = 0): Stat {
         val stat = Stat()
         val attrs =
                 Files.readAttributes(
@@ -967,8 +1005,8 @@ class SpacesVfs(private val db: SpacesDatabase) : VirtualFileSystem {
         stat.setATime(attrs.lastAccessTime().toMillis())
         stat.setMTime(attrs.lastModifiedTime().toMillis())
         stat.setCTime(attrs.creationTime().toMillis())
-        stat.setFileid(stableFileId(path, followLinks = false))
-        stat.setGeneration(0)
+        stat.setFileid(stableFileId(path, followLinks = false, pathGeneration = pathGeneration))
+        stat.setGeneration(pathGeneration)
         return stat
     }
 
@@ -1256,19 +1294,31 @@ class SpacesVfs(private val db: SpacesDatabase) : VirtualFileSystem {
             val targetRoot = mountPathForId(targetMountId) ?: return@timed
             val root = Paths.get(targetRoot)
             when (change) {
-                is ViewChange.PathUpsert ->
-                        invalidateVisiblePath(root, change.relativePath, preferParent = false)
-                is ViewChange.DirectoryConverged ->
-                        invalidateVisiblePath(root, change.relativePath, preferParent = false)
+                is ViewChange.PathUpsert -> {
+                    bumpInvalidationGeneration(targetMountId, change.relativePath)
+                    invalidateVisiblePath(root, change.relativePath, preferParent = false)
+                }
+                is ViewChange.DirectoryConverged -> {
+                    bumpInvalidationGeneration(targetMountId, change.relativePath)
+                    invalidateVisiblePath(root, change.relativePath, preferParent = false)
+                }
                 is ViewChange.ViewInvalidated -> {
+                    bumpInvalidationGeneration(targetMountId, change.relativePath)
                     invalidateVisiblePath(root, change.relativePath, preferParent = false)
                     change.targetRelativePath?.let { target ->
+                        bumpInvalidationGeneration(targetMountId, target)
+                        bumpInvalidationGeneration(targetMountId, parentRelativePath(target))
                         invalidateVisiblePath(root, parentRelativePath(target), preferParent = false)
                         invalidateVisiblePath(root, target, preferParent = false)
                     }
                 }
             }
         }
+    }
+
+    private fun bumpInvalidationGeneration(mountId: String, relative: String) {
+        bumpPathGeneration(mountId, relative)
+        bumpPathGeneration(mountId, parentRelativePath(relative))
     }
 
     private fun shouldSkipReplayEchoToAttachedLayer(
@@ -1507,7 +1557,9 @@ class SpacesVfs(private val db: SpacesDatabase) : VirtualFileSystem {
 private data class HandleEntry(
         val path: String,
         val mountId: String? = null,
-        val mountGeneration: Long? = null
+        val mountGeneration: Long? = null,
+        val relativePath: String? = null,
+        val pathGeneration: Long? = null
 )
 
 private data class OpenHandle(

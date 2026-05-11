@@ -1505,6 +1505,8 @@ if [ -n "$MOUNT_ID" ]; then
       run_case "layer2 mount ensure for same-layer vite edit case" 1 sh -lc "$CMD layer mount '$LAYER2_ID' --json"
       run_vite_same_layer_edit_case "vite dev server reloads after same-layer file edit through layer mount" "$LAYER2_MOUNT_PATH" "$MOUNTDIR" "src/message.js" "layer-two-vite" "layer-two-vite-live"
       run_same_layer_atomic_save_case "same-layer atomic save wakes watcher and updates content" "$LAYER2_MOUNT_PATH" "$MOUNTDIR" "atomic-save.txt" "atomic-initial" "atomic-final"
+      run_same_layer_shape_replace_case "same-layer file-to-directory replacement wakes watcher and updates content" "$LAYER2_MOUNT_PATH" "$MOUNTDIR" "shape-file" "file-to-dir" "shape-file/nested.txt" "shape-file-final"
+      run_same_layer_shape_replace_case "same-layer directory-to-file replacement wakes watcher and updates content" "$LAYER2_MOUNT_PATH" "$MOUNTDIR" "shape-dir" "dir-to-file" "shape-dir" "shape-dir-final"
     fi
   fi
 
