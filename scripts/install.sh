@@ -7,10 +7,34 @@ BIN_DIR="${SPACES_BIN_DIR:-$HOME/.local/bin}"
 REPO="${SPACES_GITHUB_REPOSITORY:-SaswatB/spaces}"
 API_BASE_URL="${SPACES_GITHUB_API_BASE_URL:-https://api.github.com}"
 BASE_URL="${SPACES_RELEASE_BASE_URL:-https://github.com/$REPO/releases/download}"
+GITHUB_TOKEN_VALUE="${SPACES_GITHUB_TOKEN:-${GITHUB_TOKEN:-}}"
+
+if [ "$GITHUB_TOKEN_VALUE" = "" ] && command -v gh >/dev/null 2>&1; then
+  GITHUB_TOKEN_VALUE="$(gh auth token 2>/dev/null || true)"
+fi
+
+curl_get() {
+  url="$1"
+  if [ "$GITHUB_TOKEN_VALUE" != "" ]; then
+    curl -fsSL -H "Authorization: Bearer $GITHUB_TOKEN_VALUE" "$url"
+  else
+    curl -fsSL "$url"
+  fi
+}
+
+curl_download() {
+  url="$1"
+  target="$2"
+  if [ "$GITHUB_TOKEN_VALUE" != "" ]; then
+    curl -fL -H "Authorization: Bearer $GITHUB_TOKEN_VALUE" "$url" -o "$target"
+  else
+    curl -fL "$url" -o "$target"
+  fi
+}
 
 if [ "${SPACES_VERSION:-}" = "" ]; then
   VERSION="$(
-    curl -fsSL "$API_BASE_URL/repos/$REPO/releases/latest" \
+    curl_get "$API_BASE_URL/repos/$REPO/releases/latest" \
       | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"v\{0,1\}\([^"]*\)".*/\1/p' \
       | head -n 1
   )"
@@ -55,9 +79,22 @@ mkdir -p "$BIN_DIR"
 RELEASE_TARBALL="$TMP_DIR/spaces-${VERSION}-${SUFFIX}.tar.gz"
 CHECKSUM_FILE="$TMP_DIR/SHA256SUMS-${SUFFIX}"
 
-curl -fL "$BASE_URL/v$VERSION/spaces-${VERSION}-${SUFFIX}.tar.gz" -o "$RELEASE_TARBALL"
+download_release_asset() {
+  asset="$1"
+  target="$2"
+  if [ "${SPACES_RELEASE_BASE_URL:-}" = "" ] && command -v gh >/dev/null 2>&1; then
+    gh release download "v$VERSION" --repo "$REPO" --pattern "$asset" --dir "$TMP_DIR" --clobber >/dev/null
+    if [ "$TMP_DIR/$asset" != "$target" ]; then
+      mv "$TMP_DIR/$asset" "$target"
+    fi
+  else
+    curl_download "$BASE_URL/v$VERSION/$asset" "$target"
+  fi
+}
 
-if curl -fsL "$BASE_URL/v$VERSION/SHA256SUMS-${SUFFIX}" -o "$CHECKSUM_FILE"; then
+download_release_asset "spaces-${VERSION}-${SUFFIX}.tar.gz" "$RELEASE_TARBALL"
+
+if download_release_asset "SHA256SUMS-${SUFFIX}" "$CHECKSUM_FILE"; then
   (
     cd "$TMP_DIR"
     if command -v sha256sum >/dev/null 2>&1; then
