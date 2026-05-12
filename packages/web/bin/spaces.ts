@@ -42,6 +42,12 @@ type GithubRelease = {
   assets: GithubReleaseAsset[];
 };
 
+type UpdateCheckCache = {
+  checkedAt: string;
+  latestVersion?: string;
+  releaseUrl?: string | null;
+};
+
 type CommandContext = {
   args: string[];
   opts: CommonOptions;
@@ -52,6 +58,8 @@ type CommandHandler = (ctx: CommandContext) => Promise<void>;
 const DAEMON_URL = process.env.SPACES_API_URL ?? "http://localhost:3100";
 const CURRENT_VERSION = webPackage.version;
 const DEFAULT_GITHUB_REPO = process.env.SPACES_GITHUB_REPOSITORY ?? "SaswatB/spaces";
+const UPDATE_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000;
+const UPDATE_CHECK_TIMEOUT_MS = 1000;
 
 function normalizePath(value: string): string {
   return path.resolve(value);
@@ -152,6 +160,10 @@ function logFilePath(): string {
   return path.join(stateDir(), "spacesd.log");
 }
 
+function updateCheckCachePath(): string {
+  return path.join(stateDir(), "update-check.json");
+}
+
 function readPid(): number | null {
   const pidPath = pidFilePath();
   if (!fs.existsSync(pidPath)) {
@@ -248,13 +260,18 @@ function githubHeaders(): Record<string, string> {
   return headers;
 }
 
-async function fetchGithubRelease(repo: string, version: string | undefined, apiBaseUrl: string): Promise<GithubRelease> {
+async function fetchGithubRelease(
+  repo: string,
+  version: string | undefined,
+  apiBaseUrl: string,
+  signal?: AbortSignal,
+): Promise<GithubRelease> {
   const trimmedBase = apiBaseUrl.replace(/\/+$/, "");
   const releasePath =
     !version || version === "latest"
       ? `/repos/${repo}/releases/latest`
       : `/repos/${repo}/releases/tags/${normalizeVersionTag(version)}`;
-  const response = await fetch(`${trimmedBase}${releasePath}`, { headers: githubHeaders() });
+  const response = await fetch(`${trimmedBase}${releasePath}`, { headers: githubHeaders(), signal });
   if (!response.ok) {
     throw new Error(`Failed to fetch GitHub release ${version ?? "latest"}: HTTP ${response.status}`);
   }
@@ -462,6 +479,75 @@ async function updateSpaces(version: string | undefined, opts: UpdateOptions): P
     );
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+}
+
+function readUpdateCheckCache(): UpdateCheckCache | null {
+  try {
+    const cachePath = updateCheckCachePath();
+    if (!fs.existsSync(cachePath)) return null;
+    return JSON.parse(fs.readFileSync(cachePath, "utf8")) as UpdateCheckCache;
+  } catch {
+    return null;
+  }
+}
+
+function writeUpdateCheckCache(cache: UpdateCheckCache): void {
+  try {
+    ensureStateDir();
+    fs.writeFileSync(updateCheckCachePath(), `${JSON.stringify(cache, null, 2)}\n`);
+  } catch {
+    // Update notices must never affect the command the user actually ran.
+  }
+}
+
+function shouldSkipAutoUpdateCheck(args: unknown[]): boolean {
+  const setting = (process.env.SPACES_UPDATE_CHECK ?? process.env.SPACES_AUTO_UPDATE_CHECK ?? "").toLowerCase();
+  if (setting === "0" || setting === "false" || setting === "off" || setting === "no") return true;
+  if (!process.stderr.isTTY) return true;
+  if (args.some((arg) => typeof arg === "object" && arg !== null && (arg as CommonOptions).json)) return true;
+
+  const command = cli.args[0];
+  if (!command) return true;
+  if (command === "update") return true;
+  if (command === "daemon" || command === "daemons" || command === "d") return true;
+  return false;
+}
+
+function updateCheckIsFresh(cache: UpdateCheckCache | null): boolean {
+  if (!cache?.checkedAt) return false;
+  const checkedAt = Date.parse(cache.checkedAt);
+  return Number.isFinite(checkedAt) && Date.now() - checkedAt < UPDATE_CHECK_INTERVAL_MS;
+}
+
+async function maybePrintUpdateNotice(args: unknown[]): Promise<void> {
+  if (shouldSkipAutoUpdateCheck(args)) return;
+  if (updateCheckIsFresh(readUpdateCheckCache())) return;
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), UPDATE_CHECK_TIMEOUT_MS);
+  timeout.unref?.();
+
+  try {
+    const release = await fetchGithubRelease(
+      DEFAULT_GITHUB_REPO,
+      "latest",
+      process.env.SPACES_GITHUB_API_BASE_URL ?? "https://api.github.com",
+      controller.signal,
+    );
+    const latestVersion = versionFromTag(release.tag_name);
+    writeUpdateCheckCache({
+      checkedAt: new Date().toISOString(),
+      latestVersion,
+      releaseUrl: release.html_url ?? null,
+    });
+    if (compareVersions(latestVersion, CURRENT_VERSION) > 0) {
+      console.error(`Spaces ${latestVersion} is available (current ${CURRENT_VERSION}). Run: spaces update`);
+    }
+  } catch {
+    writeUpdateCheckCache({ checkedAt: new Date().toISOString() });
+  } finally {
+    clearTimeout(timeout);
   }
 }
 
@@ -1065,10 +1151,12 @@ function printFriendlyError(error: unknown): void {
 
 function withFriendlyErrors<Args extends unknown[]>(fn: (...args: Args) => Promise<void> | void) {
   return (...args: Args): void => {
-    Promise.resolve(fn(...args)).catch((error) => {
-      printFriendlyError(error);
-      process.exit(1);
-    });
+    Promise.resolve(fn(...args))
+      .then(() => maybePrintUpdateNotice(args))
+      .catch((error) => {
+        printFriendlyError(error);
+        process.exit(1);
+      });
   };
 }
 

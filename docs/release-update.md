@@ -8,6 +8,14 @@ spaces update
 spaces update 0.1.0
 ```
 
+The CLI also performs a quiet update check at most once every 24 hours after successful interactive commands. It skips JSON output, non-interactive shells, `spaces update`, and daemon lifecycle commands. Network failures are ignored.
+
+To disable automatic checks:
+
+```bash
+SPACES_UPDATE_CHECK=0 spaces status
+```
+
 By default, the CLI checks `SaswatB/spaces` and installs the current platform's release assets into:
 
 - the directory containing the running `spaces` binary, when running from an installed binary
