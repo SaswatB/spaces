@@ -1,11 +1,13 @@
 #!/usr/bin/env node
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { createInterface } from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
 import { cac } from "cac";
+import webPackage from "../package.json";
 import { api } from "../src/lib/api";
 
 type Entrypoint = Awaited<ReturnType<typeof api.entrypoints.list>>[number];
@@ -21,6 +23,25 @@ type CommonOptions = {
   force?: boolean;
 };
 
+type UpdateOptions = CommonOptions & {
+  check?: boolean;
+  repo?: string;
+  binDir?: string;
+  apiBaseUrl?: string;
+};
+
+type GithubReleaseAsset = {
+  name: string;
+  browser_download_url: string;
+};
+
+type GithubRelease = {
+  tag_name: string;
+  html_url?: string;
+  prerelease?: boolean;
+  assets: GithubReleaseAsset[];
+};
+
 type CommandContext = {
   args: string[];
   opts: CommonOptions;
@@ -29,6 +50,8 @@ type CommandContext = {
 type CommandHandler = (ctx: CommandContext) => Promise<void>;
 
 const DAEMON_URL = process.env.SPACES_API_URL ?? "http://localhost:3100";
+const CURRENT_VERSION = webPackage.version;
+const DEFAULT_GITHUB_REPO = process.env.SPACES_GITHUB_REPOSITORY ?? "SaswatB/spaces";
 
 function normalizePath(value: string): string {
   return path.resolve(value);
@@ -160,6 +183,288 @@ function resolveDaemonPath(): string {
   return "spacesd";
 }
 
+function releasePlatformSuffix(): string {
+  const platform =
+    process.platform === "darwin" ? "darwin" : process.platform === "linux" ? "linux" : null;
+  if (!platform) {
+    throw new Error(`Unsupported OS for release updates: ${process.platform}`);
+  }
+
+  const arch =
+    process.arch === "arm64" ? "arm64" : process.arch === "x64" ? "x64" : null;
+  if (!arch) {
+    throw new Error(`Unsupported architecture for release updates: ${process.arch}`);
+  }
+
+  return `${platform}-${arch}`;
+}
+
+function defaultBinDir(): string {
+  if (process.env.SPACES_BIN_DIR) return process.env.SPACES_BIN_DIR;
+  if (path.basename(process.execPath) === "spaces") return path.dirname(process.execPath);
+  return path.join(os.homedir(), ".local", "bin");
+}
+
+function normalizeVersionTag(version: string): string {
+  return version.startsWith("v") ? version : `v${version}`;
+}
+
+function versionFromTag(tag: string): string {
+  return tag.startsWith("v") ? tag.slice(1) : tag;
+}
+
+function parseSemver(version: string): [number, number, number, string] | null {
+  const match = version.match(/^v?(\d+)\.(\d+)\.(\d+)(.*)$/);
+  if (!match) return null;
+  return [
+    Number.parseInt(match[1] ?? "0", 10),
+    Number.parseInt(match[2] ?? "0", 10),
+    Number.parseInt(match[3] ?? "0", 10),
+    match[4] ?? "",
+  ];
+}
+
+function compareVersions(a: string, b: string): number {
+  const parsedA = parseSemver(a);
+  const parsedB = parseSemver(b);
+  if (!parsedA || !parsedB) return a.localeCompare(b);
+  for (let i = 0; i < 3; i += 1) {
+    const delta = (parsedA[i] as number) - (parsedB[i] as number);
+    if (delta !== 0) return delta;
+  }
+  if (parsedA[3] === parsedB[3]) return 0;
+  if (!parsedA[3]) return 1;
+  if (!parsedB[3]) return -1;
+  return parsedA[3].localeCompare(parsedB[3]);
+}
+
+function githubHeaders(): Record<string, string> {
+  const token = process.env.SPACES_GITHUB_TOKEN ?? process.env.GITHUB_TOKEN;
+  const headers: Record<string, string> = {
+    Accept: "application/vnd.github+json",
+    "User-Agent": `spaces/${CURRENT_VERSION}`,
+  };
+  if (token) headers.Authorization = `Bearer ${token}`;
+  return headers;
+}
+
+async function fetchGithubRelease(repo: string, version: string | undefined, apiBaseUrl: string): Promise<GithubRelease> {
+  const trimmedBase = apiBaseUrl.replace(/\/+$/, "");
+  const releasePath =
+    !version || version === "latest"
+      ? `/repos/${repo}/releases/latest`
+      : `/repos/${repo}/releases/tags/${normalizeVersionTag(version)}`;
+  const response = await fetch(`${trimmedBase}${releasePath}`, { headers: githubHeaders() });
+  if (!response.ok) {
+    throw new Error(`Failed to fetch GitHub release ${version ?? "latest"}: HTTP ${response.status}`);
+  }
+  return (await response.json()) as GithubRelease;
+}
+
+function findReleaseAsset(release: GithubRelease, name: string): GithubReleaseAsset {
+  const asset = release.assets.find((candidate) => candidate.name === name);
+  if (!asset) {
+    throw new Error(`Release ${release.tag_name} is missing asset ${name}`);
+  }
+  return asset;
+}
+
+async function downloadFile(url: string, target: string): Promise<void> {
+  const response = await fetch(url, { headers: githubHeaders() });
+  if (!response.ok) {
+    throw new Error(`Failed to download ${url}: HTTP ${response.status}`);
+  }
+  const data = Buffer.from(await response.arrayBuffer());
+  fs.writeFileSync(target, data);
+}
+
+function sha256File(filePath: string): string {
+  const hash = createHash("sha256");
+  hash.update(fs.readFileSync(filePath));
+  return hash.digest("hex");
+}
+
+function checksumForAsset(checksums: string, assetName: string): string | null {
+  for (const line of checksums.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    const parts = trimmed.split(/\s+/);
+    const hash = parts[0];
+    const name = parts[parts.length - 1]?.replace(/^\*/, "");
+    if (hash && name === assetName) return hash;
+  }
+  return null;
+}
+
+async function verifyChecksumIfAvailable(
+  release: GithubRelease,
+  suffix: string,
+  downloads: Array<{ name: string; path: string }>,
+): Promise<boolean> {
+  const checksumAsset =
+    release.assets.find((asset) => asset.name === `SHA256SUMS-${suffix}`) ??
+    release.assets.find((asset) => asset.name === "SHA256SUMS");
+  if (!checksumAsset) return false;
+
+  const response = await fetch(checksumAsset.browser_download_url, { headers: githubHeaders() });
+  if (!response.ok) {
+    throw new Error(`Failed to download SHA256SUMS: HTTP ${response.status}`);
+  }
+  const checksums = await response.text();
+  for (const download of downloads) {
+    const expected = checksumForAsset(checksums, download.name);
+    if (!expected) {
+      throw new Error(`SHA256SUMS does not include ${download.name}`);
+    }
+    const actual = sha256File(download.path);
+    if (actual !== expected) {
+      throw new Error(`Checksum mismatch for ${download.name}`);
+    }
+  }
+  return true;
+}
+
+function extractTarball(archivePath: string, targetDir: string): void {
+  const result = spawnSync("tar", ["-xzf", archivePath, "-C", targetDir], { stdio: "inherit" });
+  if (result.status !== 0) {
+    throw new Error(`Failed to extract ${archivePath}`);
+  }
+}
+
+function installFile(source: string, target: string): void {
+  const tempTarget = `${target}.tmp-${process.pid}`;
+  fs.copyFileSync(source, tempTarget);
+  fs.chmodSync(tempTarget, 0o755);
+  fs.renameSync(tempTarget, target);
+}
+
+function replaceDirectory(source: string, target: string): void {
+  const tempTarget = `${target}.tmp-${process.pid}`;
+  fs.rmSync(tempTarget, { recursive: true, force: true });
+  fs.cpSync(source, tempTarget, { recursive: true });
+  fs.rmSync(target, { recursive: true, force: true });
+  fs.renameSync(tempTarget, target);
+}
+
+async function updateSpaces(version: string | undefined, opts: UpdateOptions): Promise<void> {
+  const repo = opts.repo ?? DEFAULT_GITHUB_REPO;
+  const apiBaseUrl = opts.apiBaseUrl ?? process.env.SPACES_GITHUB_API_BASE_URL ?? "https://api.github.com";
+  const release = await fetchGithubRelease(repo, version, apiBaseUrl);
+  const targetVersion = versionFromTag(release.tag_name);
+  const suffix = releasePlatformSuffix();
+  const updateAvailable = compareVersions(targetVersion, CURRENT_VERSION) > 0;
+  const sameVersion = compareVersions(targetVersion, CURRENT_VERSION) === 0;
+
+  if (opts.check) {
+    outputData(
+      buildCtx([], opts),
+      {
+        currentVersion: CURRENT_VERSION,
+        latestVersion: targetVersion,
+        updateAvailable,
+        releaseUrl: release.html_url ?? null,
+      },
+      (value) => {
+        if (value.updateAvailable) {
+          console.log(`Update available: ${value.currentVersion} -> ${value.latestVersion}`);
+        } else {
+          console.log(`Spaces is up to date (${value.currentVersion}).`);
+        }
+        if (value.releaseUrl) console.log(value.releaseUrl);
+      },
+    );
+    return;
+  }
+
+  if (sameVersion && !opts.force) {
+    outputData(
+      buildCtx([], opts),
+      { ok: true, updated: false, currentVersion: CURRENT_VERSION, targetVersion },
+      () => {
+        console.log(`Spaces is already at ${targetVersion}. Re-run with --force to reinstall.`);
+      },
+    );
+    return;
+  }
+
+  if (compareVersions(targetVersion, CURRENT_VERSION) < 0 && !opts.force) {
+    throw new Error(`Refusing to downgrade ${CURRENT_VERSION} -> ${targetVersion}. Re-run with --force.`);
+  }
+
+  const cliAssetName = `spaces-${targetVersion}-${suffix}.tar.gz`;
+  const daemonAssetName = `spacesd-${targetVersion}-${suffix}.tar.gz`;
+  const cliAsset = findReleaseAsset(release, cliAssetName);
+  const daemonAsset = findReleaseAsset(release, daemonAssetName);
+  const binDir = path.resolve(opts.binDir ?? defaultBinDir());
+
+  await confirmOrThrow(`Install Spaces ${targetVersion} to ${binDir}?`, opts.force);
+
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "spaces-update-"));
+  try {
+    const cliArchive = path.join(tempDir, cliAssetName);
+    const daemonArchive = path.join(tempDir, daemonAssetName);
+    await downloadFile(cliAsset.browser_download_url, cliArchive);
+    await downloadFile(daemonAsset.browser_download_url, daemonArchive);
+    const verified = await verifyChecksumIfAvailable(release, suffix, [
+      { name: cliAssetName, path: cliArchive },
+      { name: daemonAssetName, path: daemonArchive },
+    ]);
+
+    const extractDir = path.join(tempDir, "extract");
+    fs.mkdirSync(extractDir, { recursive: true });
+    extractTarball(cliArchive, extractDir);
+    extractTarball(daemonArchive, extractDir);
+
+    const spacesPath = path.join(extractDir, "spaces");
+    const spacesdPath = path.join(extractDir, "spacesd");
+    const runtimePath = path.join(extractDir, "spacesd-runtime");
+    const libPath = path.join(extractDir, "spacesd-lib");
+    if (!fs.existsSync(spacesPath)) throw new Error("Downloaded CLI archive did not contain spaces");
+    if (!fs.existsSync(spacesdPath)) throw new Error("Downloaded daemon archive did not contain spacesd");
+    if (!fs.existsSync(runtimePath)) throw new Error("Downloaded daemon archive did not contain spacesd-runtime");
+    if (!fs.existsSync(libPath)) throw new Error("Downloaded daemon archive did not contain spacesd-lib");
+
+    const daemonStatus = daemonStatusPayload();
+    const shouldRestartDaemon = daemonStatus.running;
+    if (shouldRestartDaemon) {
+      const stopped = await stopDaemon();
+      if (!stopped.stopped) {
+        throw new Error(stopped.message);
+      }
+    }
+
+    fs.mkdirSync(binDir, { recursive: true });
+    installFile(spacesPath, path.join(binDir, "spaces"));
+    installFile(spacesdPath, path.join(binDir, "spacesd"));
+    replaceDirectory(runtimePath, path.join(binDir, "spacesd-runtime"));
+    replaceDirectory(libPath, path.join(binDir, "spacesd-lib"));
+
+    if (shouldRestartDaemon) {
+      await startDaemon();
+    }
+
+    outputData(
+      buildCtx([], opts),
+      {
+        ok: true,
+        updated: true,
+        previousVersion: CURRENT_VERSION,
+        version: targetVersion,
+        binDir,
+        checksumVerified: verified,
+        daemonRestarted: shouldRestartDaemon,
+      },
+      (value) => {
+        console.log(`Installed Spaces ${value.version} to ${value.binDir}.`);
+        console.log(value.checksumVerified ? "Checksums verified." : "No SHA256SUMS asset was published for this release.");
+        if (value.daemonRestarted) console.log("Daemon restarted.");
+      },
+    );
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+}
+
 function printTable(rows: Array<Record<string, string>>): void {
   if (rows.length === 0) {
     console.log("No results.");
@@ -270,6 +575,56 @@ async function stopDaemon(): Promise<{ stopped: boolean; message: string; pid: n
   return { stopped: true, message: `Force stopped daemon ${pid}.`, pid };
 }
 
+async function startDaemon(args: string[] = []): Promise<{ alreadyRunning: boolean; pid: number; logFile: string }> {
+  const pid = readPid();
+  if (pid && isRunning(pid)) {
+    return { alreadyRunning: true, pid, logFile: logFilePath() };
+  }
+  if (pid && !isRunning(pid)) {
+    fs.rmSync(pidFilePath(), { force: true });
+  }
+
+  ensureStateDir();
+  const daemonPath = resolveDaemonPath();
+  if (daemonPath.includes(path.sep) && !fs.existsSync(daemonPath)) {
+    throw new Error(`Daemon binary not found at ${daemonPath}`);
+  }
+
+  const logPath = logFilePath();
+  const logFd = fs.openSync(logPath, "a");
+  let child: ReturnType<typeof spawn> | null = null;
+  try {
+    child = spawn(daemonPath, args, {
+      detached: true,
+      stdio: ["ignore", logFd, logFd],
+      env: { ...process.env },
+    });
+    await new Promise<void>((resolve, reject) => {
+      child?.once("error", reject);
+      child?.once("spawn", resolve);
+    });
+  } catch (error) {
+    if (child?.pid) {
+      try {
+        process.kill(child.pid, "SIGKILL");
+      } catch {
+        // ignore cleanup failures
+      }
+    }
+    fs.closeSync(logFd);
+    throw error;
+  }
+
+  child.unref();
+  const startedPid = child.pid;
+  if (!startedPid) {
+    throw new Error("Daemon process started without a pid.");
+  }
+  fs.writeFileSync(pidFilePath(), String(startedPid));
+  fs.closeSync(logFd);
+  return { alreadyRunning: false, pid: startedPid, logFile: logPath };
+}
+
 async function resolveEntrypoint(ref?: string): Promise<Entrypoint | null> {
   const entrypoints = await api.entrypoints.list();
   if (ref) {
@@ -314,57 +669,12 @@ const daemonCommands = {
     });
   },
   start: async (ctx) => {
-    const pid = readPid();
-    if (pid && isRunning(pid)) {
-      outputData(ctx, { ok: true, alreadyRunning: true, pid }, (value) => {
+    const result = await startDaemon(ctx.args);
+    outputData(ctx, { ok: true, alreadyRunning: result.alreadyRunning, pid: result.pid, logFile: result.logFile }, (value) => {
+      if (value.alreadyRunning) {
         console.log(`Daemon already running (pid ${value.pid}).`);
-      });
-      return;
-    }
-    if (pid && !isRunning(pid)) {
-      fs.rmSync(pidFilePath(), { force: true });
-    }
-
-    ensureStateDir();
-    const daemonPath = resolveDaemonPath();
-    if (daemonPath.includes(path.sep) && !fs.existsSync(daemonPath)) {
-      throw new Error(`Daemon binary not found at ${daemonPath}`);
-    }
-
-    const logPath = logFilePath();
-    const logFd = fs.openSync(logPath, "a");
-    let child: ReturnType<typeof spawn> | null = null;
-    try {
-      child = spawn(daemonPath, ctx.args, {
-        detached: true,
-        stdio: ["ignore", logFd, logFd],
-        env: { ...process.env },
-      });
-      await new Promise<void>((resolve, reject) => {
-        child?.once("error", reject);
-        child?.once("spawn", resolve);
-      });
-    } catch (error) {
-      if (child?.pid) {
-        try {
-          process.kill(child.pid, "SIGKILL");
-        } catch {
-          // ignore cleanup failures
-        }
+        return;
       }
-      fs.closeSync(logFd);
-      throw error;
-    }
-
-    child.unref();
-    const startedPid = child.pid;
-    if (!startedPid) {
-      throw new Error("Daemon process started without a pid.");
-    }
-    fs.writeFileSync(pidFilePath(), String(startedPid));
-    fs.closeSync(logFd);
-
-    outputData(ctx, { ok: true, pid: startedPid, logFile: logPath }, (value) => {
       console.log(`Started daemon (pid ${value.pid}).`);
       console.log(`Logs: ${value.logFile}`);
     });
@@ -820,6 +1130,7 @@ function dispatchCategory(
 const cli = cac("spaces");
 
 cli
+  .version(CURRENT_VERSION)
   .option("-j, --json", "Print structured JSON output")
   .option("-f, --force", "Skip destructive-action confirmations")
   .help();
@@ -835,6 +1146,18 @@ cli.command("remount", "Remount all layers and user mounts").action(
     await rootCommands.remount(buildCtx([], opts));
   }),
 );
+
+cli
+  .command("update [version]", "Install or check for updates from GitHub Releases")
+  .option("--check", "Only check whether an update is available")
+  .option("--repo <owner/repo>", "GitHub repository to use", { default: DEFAULT_GITHUB_REPO })
+  .option("--api-base-url <url>", "GitHub API base URL")
+  .option("--bin-dir <path>", "Installation directory")
+  .action(
+    withFriendlyErrors(async (version: string | undefined, opts: UpdateOptions) => {
+      await updateSpaces(version, opts);
+    }),
+  );
 
 cli
   .command("entrypoint [subcommand] [...rest]", "Entrypoint operations")
@@ -891,6 +1214,7 @@ cli.example("layer create --entrypoint ep_123 --name feat-login --parent lyr_123
 cli.example("mount create dev ~/worktree --entrypoint ep_123 --layer lyr_456");
 cli.example("mount delete mnt_123 --force");
 cli.example("daemon start");
+cli.example("update --check");
 
 cli.on("command:*", () => {
   const raw = cli.args.join(" ").trim();

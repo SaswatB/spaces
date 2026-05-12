@@ -120,6 +120,18 @@ tar -C "$WORK_DIR" -czf "$CLI_ARCHIVE" spaces
 echo "Packing $DAEMON_ARCHIVE"
 tar -C "$WORK_DIR" -czf "$DAEMON_ARCHIVE" spacesd spacesd-runtime spacesd-lib
 
+CHECKSUM_FILE="$OUT_DIR/SHA256SUMS-${SUFFIX}"
+echo "Writing $CHECKSUM_FILE"
+(
+  cd "$OUT_DIR"
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "spaces-${VERSION}-${SUFFIX}.tar.gz" "spacesd-${VERSION}-${SUFFIX}.tar.gz"
+  else
+    shasum -a 256 "spaces-${VERSION}-${SUFFIX}.tar.gz" "spacesd-${VERSION}-${SUFFIX}.tar.gz"
+  fi
+) > "$CHECKSUM_FILE"
+
 echo "Artifacts written:"
 echo "  $CLI_ARCHIVE"
 echo "  $DAEMON_ARCHIVE"
+echo "  $CHECKSUM_FILE"
