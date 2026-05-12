@@ -1,4 +1,4 @@
-#!/usr/bin/env sh
+#!/usr/bin/env bash
 set -euo pipefail
 
 BIN_DIR="${SPACES_BIN_DIR:-$HOME/.local/bin}"
