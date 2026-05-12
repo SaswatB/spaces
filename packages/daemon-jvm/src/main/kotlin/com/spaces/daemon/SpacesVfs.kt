@@ -62,6 +62,10 @@ class SpacesVfs(private val db: SpacesDatabase) : VirtualFileSystem {
         }
     }
 
+    fun clearMountGenerations(mountId: String) {
+        pathGenerations.keys.removeIf { it.startsWith("$mountId:") }
+    }
+
     override fun access(inode: Inode, mode: Int): Int {
         val resolved = resolveNode(inode)
         requireKnown(resolved)

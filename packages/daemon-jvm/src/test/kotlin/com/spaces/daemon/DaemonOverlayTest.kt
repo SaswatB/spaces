@@ -19,6 +19,7 @@ import kotlin.test.fail
 import org.dcache.nfs.status.ExistException
 import org.dcache.nfs.status.NoEntException
 import org.dcache.nfs.status.NotEmptyException
+import org.dcache.nfs.status.StaleException
 import org.dcache.nfs.v4.xdr.nfs4_prot
 import org.dcache.nfs.v4.xdr.stateid4
 import org.dcache.nfs.vfs.Inode
@@ -122,6 +123,52 @@ class DaemonOverlayTest {
         assertTrue(env.replication.awaitIdle(5_000))
 
         assertFalse((env.userMountPath("mount") / "same-layer.txt").exists())
+    }
+
+    @Test
+    fun sameLayerAttachedMountInvalidationChangesUserMountPathIdentity() = withTestEnv { env ->
+        env.writeLayerFile("child", "identity.txt", "fresh")
+        val mountRoot = env.userMountRoot("mount")
+        val before = env.vfs.lookup(mountRoot, "identity.txt")
+        val beforeStat = env.vfs.getattr(before)
+
+        env.replication.handleOp(NfsOp("child", "identity.txt", NfsOpKind.Write))
+        assertTrue(env.replication.awaitIdle(5_000))
+
+        val after = env.vfs.lookup(mountRoot, "identity.txt")
+        val afterStat = env.vfs.getattr(after)
+        assertFalse(before.fileId.contentEquals(after.fileId))
+        assertFalse(beforeStat.fileId == afterStat.fileId)
+        assertTrue(afterStat.generation > beforeStat.generation)
+        assertFalse((env.userMountPath("mount") / "identity.txt").exists())
+    }
+
+    @Test
+    fun sameLayerAttachedMountInvalidationMakesOldUserMountHandleStale() = withTestEnv { env ->
+        env.writeLayerFile("child", "stale.txt", "fresh")
+        val before = env.vfs.lookup(env.userMountRoot("mount"), "stale.txt")
+
+        env.replication.handleOp(NfsOp("child", "stale.txt", NfsOpKind.Write))
+        assertTrue(env.replication.awaitIdle(5_000))
+
+        assertFailsWith<StaleException> { env.vfs.getattr(before) }
+    }
+
+    @Test
+    fun sameLayerAttachedMountInvalidationDoesNotChangeLayerMountIdentity() = withTestEnv { env ->
+        env.writeLayerFile("child", "layer-identity.txt", "fresh")
+        val layerRoot = env.layerRoot("child")
+        val before = env.vfs.lookup(layerRoot, "layer-identity.txt")
+        val beforeStat = env.vfs.getattr(before)
+
+        env.replication.handleOp(NfsOp("child", "layer-identity.txt", NfsOpKind.Write))
+        assertTrue(env.replication.awaitIdle(5_000))
+
+        val after = env.vfs.lookup(layerRoot, "layer-identity.txt")
+        val afterStat = env.vfs.getattr(after)
+        assertTrue(before.fileId.contentEquals(after.fileId))
+        assertEquals(beforeStat.fileId, afterStat.fileId)
+        assertEquals(beforeStat.generation, afterStat.generation)
     }
 
     @Test
@@ -361,6 +408,12 @@ private class TestEnv(root: Path) {
         val root = vfs.getRootInode()
         val layersDir = vfs.lookup(root, "layers")
         return vfs.lookup(layersDir, layerId)
+    }
+
+    fun userMountRoot(mountId: String): Inode {
+        val root = vfs.getRootInode()
+        val mountsDir = vfs.lookup(root, "mounts")
+        return vfs.lookup(mountsDir, mountId)
     }
 
     fun layerUpper(layerId: String): Path = dataDir / "layers" / layerId / "upper"

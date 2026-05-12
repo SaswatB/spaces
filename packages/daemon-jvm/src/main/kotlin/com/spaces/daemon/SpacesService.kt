@@ -183,6 +183,7 @@ class SpacesService(
         if (mount != null) {
             runCatching { unmountUserMount(mount) }
         }
+        vfs.clearMountGenerations(id)
         db.deleteUserMount(id)
     }
 
@@ -217,6 +218,7 @@ class SpacesService(
                 }
             }
             mountUserMount(updated)
+            vfs.clearMountGenerations(userMountId)
             replication.handleLayerSwitchInvalidation(updated.mountPath, oldLayerId, layerId)
             if (!replication.awaitMountInvalidation(updated.mountPath)) {
                 throw IllegalStateException("Timed out waiting for mount attach invalidation to settle")
