@@ -26,7 +26,6 @@ The release must publish these assets for the current platform:
 
 ```text
 spaces-<version>-<platform>-<arch>.tar.gz
-spacesd-<version>-<platform>-<arch>.tar.gz
 SHA256SUMS-<platform>-<arch>
 ```
 
@@ -39,7 +38,7 @@ darwin-x64
 
 Linux artifacts are intentionally not published yet. The daemon still has macOS-specific mount management, so Linux is not a supported release target.
 
-If `SHA256SUMS-<platform>-<arch>` is present, `spaces update` verifies both tarballs before installing. Older releases without checksums can still be installed, but the command reports that checksums were not verified.
+If `SHA256SUMS-<platform>-<arch>` is present, `spaces update` verifies the tarball before installing. Older releases without checksums can still be installed, but the command reports that checksums were not verified.
 
 Useful options:
 
@@ -52,4 +51,10 @@ spaces update --force
 
 For private repositories, set `SPACES_GITHUB_TOKEN` or `GITHUB_TOKEN`.
 
-If the daemon is running, the updater downloads and verifies the new assets first, then stops the daemon, replaces `spaces`, `spacesd`, `spacesd-runtime`, and `spacesd-lib`, and restarts the daemon.
+If the daemon is running, the updater downloads and verifies the new asset first, then stops the daemon, replaces `spaces`, `spacesd`, `spacesd-runtime`, and `spacesd-lib`, and restarts the daemon.
+
+The install script can be used directly from GitHub:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/SaswatB/spaces/main/scripts/install.sh | bash
+```

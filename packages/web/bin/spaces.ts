@@ -407,38 +407,32 @@ async function updateSpaces(version: string | undefined, opts: UpdateOptions): P
     throw new Error(`Refusing to downgrade ${CURRENT_VERSION} -> ${targetVersion}. Re-run with --force.`);
   }
 
-  const cliAssetName = `spaces-${targetVersion}-${suffix}.tar.gz`;
-  const daemonAssetName = `spacesd-${targetVersion}-${suffix}.tar.gz`;
-  const cliAsset = findReleaseAsset(release, cliAssetName);
-  const daemonAsset = findReleaseAsset(release, daemonAssetName);
+  const assetName = `spaces-${targetVersion}-${suffix}.tar.gz`;
+  const asset = findReleaseAsset(release, assetName);
   const binDir = path.resolve(opts.binDir ?? defaultBinDir());
 
   await confirmOrThrow(`Install Spaces ${targetVersion} to ${binDir}?`, opts.force);
 
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "spaces-update-"));
   try {
-    const cliArchive = path.join(tempDir, cliAssetName);
-    const daemonArchive = path.join(tempDir, daemonAssetName);
-    await downloadFile(cliAsset.browser_download_url, cliArchive);
-    await downloadFile(daemonAsset.browser_download_url, daemonArchive);
+    const releaseArchive = path.join(tempDir, assetName);
+    await downloadFile(asset.browser_download_url, releaseArchive);
     const verified = await verifyChecksumIfAvailable(release, suffix, [
-      { name: cliAssetName, path: cliArchive },
-      { name: daemonAssetName, path: daemonArchive },
+      { name: assetName, path: releaseArchive },
     ]);
 
     const extractDir = path.join(tempDir, "extract");
     fs.mkdirSync(extractDir, { recursive: true });
-    extractTarball(cliArchive, extractDir);
-    extractTarball(daemonArchive, extractDir);
+    extractTarball(releaseArchive, extractDir);
 
     const spacesPath = path.join(extractDir, "spaces");
     const spacesdPath = path.join(extractDir, "spacesd");
     const runtimePath = path.join(extractDir, "spacesd-runtime");
     const libPath = path.join(extractDir, "spacesd-lib");
-    if (!fs.existsSync(spacesPath)) throw new Error("Downloaded CLI archive did not contain spaces");
-    if (!fs.existsSync(spacesdPath)) throw new Error("Downloaded daemon archive did not contain spacesd");
-    if (!fs.existsSync(runtimePath)) throw new Error("Downloaded daemon archive did not contain spacesd-runtime");
-    if (!fs.existsSync(libPath)) throw new Error("Downloaded daemon archive did not contain spacesd-lib");
+    if (!fs.existsSync(spacesPath)) throw new Error("Downloaded archive did not contain spaces");
+    if (!fs.existsSync(spacesdPath)) throw new Error("Downloaded archive did not contain spacesd");
+    if (!fs.existsSync(runtimePath)) throw new Error("Downloaded archive did not contain spacesd-runtime");
+    if (!fs.existsSync(libPath)) throw new Error("Downloaded archive did not contain spacesd-lib");
 
     const daemonStatus = daemonStatusPayload();
     const shouldRestartDaemon = daemonStatus.running;

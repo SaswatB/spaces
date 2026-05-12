@@ -73,8 +73,8 @@ else
   printf "Skipping release artifact build (SPACES_QA_BUILD_ARTIFACTS=%s)\n" "$BUILD_ARTIFACTS"
 fi
 SUFFIX="$(uname -s | tr '[:upper:]' '[:lower:]')-$(uname -m | sed 's/x86_64/x64/;s/aarch64/arm64/;s/arm64/arm64/')"
-DAEMON_TGZ="$ROOT_DIR/release/spacesd-$VERSION-$SUFFIX.tar.gz"
-tar -xzf "$DAEMON_TGZ" -C "$RUNTIME_ROOT"
+RELEASE_TGZ="$ROOT_DIR/release/spaces-$VERSION-$SUFFIX.tar.gz"
+tar -xzf "$RELEASE_TGZ" -C "$RUNTIME_ROOT"
 
 export SPACES_DAEMON_PATH="$RUNTIME_ROOT/spacesd"
 export SPACES_API_URL="http://127.0.0.1:$API_PORT"

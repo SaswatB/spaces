@@ -70,6 +70,10 @@ cleanup() {
 trap cleanup EXIT
 
 mkdir -p "$OUT_DIR"
+rm -f \
+  "$OUT_DIR/spaces-${VERSION}-${SUFFIX}.tar.gz" \
+  "$OUT_DIR/spacesd-${VERSION}-${SUFFIX}.tar.gz" \
+  "$OUT_DIR/SHA256SUMS-${SUFFIX}"
 
 echo "Building CLI single-file binary (bun)..."
 bun build "$ROOT_DIR/packages/web/bin/spaces.ts" --compile --outfile "$WORK_DIR/spaces"
@@ -112,26 +116,22 @@ exec "$JAVA_BIN" -classpath "$CLASSPATH" com.spaces.daemon.MainKt "$@"
 LAUNCHER
 chmod +x "$WORK_DIR/spacesd"
 
-CLI_ARCHIVE="$OUT_DIR/spaces-${VERSION}-${SUFFIX}.tar.gz"
-DAEMON_ARCHIVE="$OUT_DIR/spacesd-${VERSION}-${SUFFIX}.tar.gz"
+RELEASE_ARCHIVE="$OUT_DIR/spaces-${VERSION}-${SUFFIX}.tar.gz"
 
-echo "Packing $CLI_ARCHIVE"
-tar -C "$WORK_DIR" -czf "$CLI_ARCHIVE" spaces
-echo "Packing $DAEMON_ARCHIVE"
-tar -C "$WORK_DIR" -czf "$DAEMON_ARCHIVE" spacesd spacesd-runtime spacesd-lib
+echo "Packing $RELEASE_ARCHIVE"
+tar -C "$WORK_DIR" -czf "$RELEASE_ARCHIVE" spaces spacesd spacesd-runtime spacesd-lib
 
 CHECKSUM_FILE="$OUT_DIR/SHA256SUMS-${SUFFIX}"
 echo "Writing $CHECKSUM_FILE"
 (
   cd "$OUT_DIR"
   if command -v sha256sum >/dev/null 2>&1; then
-    sha256sum "spaces-${VERSION}-${SUFFIX}.tar.gz" "spacesd-${VERSION}-${SUFFIX}.tar.gz"
+    sha256sum "spaces-${VERSION}-${SUFFIX}.tar.gz"
   else
-    shasum -a 256 "spaces-${VERSION}-${SUFFIX}.tar.gz" "spacesd-${VERSION}-${SUFFIX}.tar.gz"
+    shasum -a 256 "spaces-${VERSION}-${SUFFIX}.tar.gz"
   fi
 ) > "$CHECKSUM_FILE"
 
 echo "Artifacts written:"
-echo "  $CLI_ARCHIVE"
-echo "  $DAEMON_ARCHIVE"
+echo "  $RELEASE_ARCHIVE"
 echo "  $CHECKSUM_FILE"

@@ -12,6 +12,12 @@ Spaces provides OverlayFS-like local development layers on systems where native 
 
 ## Common Commands
 
+Install the latest macOS release:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/SaswatB/spaces/main/scripts/install.sh | bash
+```
+
 ```bash
 pnpm install
 pnpm typecheck
@@ -41,9 +47,9 @@ pnpm install:release
 pnpm uninstall:release
 ```
 
-- `pnpm release:artifacts`: build local release tarballs for the current platform.
+- `pnpm release:artifacts`: build a local release tarball for the current platform.
 - `pnpm release:tag [major|minor|patch]`: bump versions, commit `Release vX.Y.Z`, create an annotated `vX.Y.Z` tag, and push the branch plus tag. Default bump is `minor`.
-- `pnpm install:release`: install published release artifacts. Requires `SPACES_VERSION` and `SPACES_RELEASE_BASE_URL`.
+- `pnpm install:release`: install the latest published release, or `SPACES_VERSION=<version> pnpm install:release`.
 - `pnpm uninstall:release`: remove installed `spaces`, `spacesd`, and bundled daemon runtime files.
 
 Pushing a `v*` tag triggers the GitHub Actions release workflow, which builds macOS artifacts and publishes them to a GitHub Release.
