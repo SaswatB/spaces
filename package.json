@@ -14,6 +14,7 @@
     "qa:cli-daemon": "sh ./scripts/qa-cli-daemon.sh",
     "bench:cli-daemon": "sh ./scripts/bench-cli-daemon.sh",
     "release:artifacts": "sh ./scripts/build-release-artifacts.sh",
+    "release:tag": "bash ./scripts/tag-release.sh",
     "install:release": "sh ./scripts/install.sh",
     "uninstall:release": "sh ./scripts/uninstall.sh",
     "cli": "pnpm --filter @spaces/web cli"
