@@ -35,9 +35,9 @@ Supported platform suffixes are currently:
 ```text
 darwin-arm64
 darwin-x64
-linux-arm64
-linux-x64
 ```
+
+Linux artifacts are intentionally not published yet. The daemon still has macOS-specific mount management, so Linux is not a supported release target.
 
 If `SHA256SUMS-<platform>-<arch>` is present, `spaces update` verifies both tarballs before installing. Older releases without checksums can still be installed, but the command reports that checksums were not verified.
 

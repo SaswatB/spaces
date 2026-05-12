@@ -196,10 +196,9 @@ function resolveDaemonPath(): string {
 }
 
 function releasePlatformSuffix(): string {
-  const platform =
-    process.platform === "darwin" ? "darwin" : process.platform === "linux" ? "linux" : null;
+  const platform = process.platform === "darwin" ? "darwin" : null;
   if (!platform) {
-    throw new Error(`Unsupported OS for release updates: ${process.platform}`);
+    throw new Error(`Unsupported OS for release updates: ${process.platform}. Spaces releases are currently macOS-only.`);
   }
 
   const arch =

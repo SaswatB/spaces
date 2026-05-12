@@ -23,9 +23,9 @@ ARCH="$(uname -m)"
 
 case "$OS" in
   Darwin) PLATFORM="darwin" ;;
-  Linux) PLATFORM="linux" ;;
   *)
-    echo "Unsupported OS: $OS"
+    echo "Unsupported OS for Spaces release install: $OS"
+    echo "Spaces release artifacts are currently macOS-only."
     exit 1
     ;;
 esac

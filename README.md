@@ -46,7 +46,7 @@ pnpm uninstall:release
 - `pnpm install:release`: install published release artifacts. Requires `SPACES_VERSION` and `SPACES_RELEASE_BASE_URL`.
 - `pnpm uninstall:release`: remove installed `spaces`, `spacesd`, and bundled daemon runtime files.
 
-Pushing a `v*` tag triggers the GitHub Actions release workflow, which builds macOS/Linux artifacts and publishes them to a GitHub Release.
+Pushing a `v*` tag triggers the GitHub Actions release workflow, which builds macOS artifacts and publishes them to a GitHub Release.
 
 ## More Detail
 
