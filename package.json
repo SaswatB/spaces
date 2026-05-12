@@ -1,6 +1,6 @@
 {
   "name": "spaces",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "private": true,
   "description": "OverlayFS management system with web UI",
   "scripts": {
