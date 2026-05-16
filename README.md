@@ -24,6 +24,12 @@ Uninstall:
 spaces-uninstall
 ```
 
+The installer asks whether to enable daily update notices. The default is off; non-interactive installs leave it off. To preselect the answer:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/SaswatB/spaces/main/scripts/install.sh | SPACES_AUTO_UPDATE_CHECK=1 bash
+```
+
 Spaces releases are currently macOS-only.
 
 ## Usage
@@ -86,7 +92,13 @@ spaces entrypoint delete repo --force
 spaces daemon stop
 ```
 
-Update checks happen at most once per day when the CLI runs. To check or update manually:
+Update notices are opt-in and run at most once per day when the CLI is used. View the config path and current settings:
+
+```bash
+spaces config
+```
+
+To check or update manually:
 
 ```bash
 spaces update --check

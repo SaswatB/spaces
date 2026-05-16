@@ -48,6 +48,10 @@ type UpdateCheckCache = {
   releaseUrl?: string | null;
 };
 
+type SpacesConfig = {
+  autoUpdateCheck: boolean;
+};
+
 type CommandContext = {
   args: string[];
   opts: CommonOptions;
@@ -162,6 +166,29 @@ function logFilePath(): string {
 
 function updateCheckCachePath(): string {
   return path.join(stateDir(), "update-check.json");
+}
+
+function configPath(): string {
+  return path.join(stateDir(), "config.json");
+}
+
+function defaultConfig(): SpacesConfig {
+  return { autoUpdateCheck: false };
+}
+
+function readConfig(): SpacesConfig {
+  const defaults = defaultConfig();
+  try {
+    const filePath = configPath();
+    if (!fs.existsSync(filePath)) return defaults;
+    const parsed = JSON.parse(fs.readFileSync(filePath, "utf8")) as Partial<SpacesConfig>;
+    return {
+      autoUpdateCheck:
+        typeof parsed.autoUpdateCheck === "boolean" ? parsed.autoUpdateCheck : defaults.autoUpdateCheck,
+    };
+  } catch {
+    return defaults;
+  }
 }
 
 function readPid(): number | null {
@@ -500,12 +527,18 @@ function writeUpdateCheckCache(cache: UpdateCheckCache): void {
 function shouldSkipAutoUpdateCheck(args: unknown[]): boolean {
   const setting = (process.env.SPACES_UPDATE_CHECK ?? process.env.SPACES_AUTO_UPDATE_CHECK ?? "").toLowerCase();
   if (setting === "0" || setting === "false" || setting === "off" || setting === "no") return true;
+  if (setting === "1" || setting === "true" || setting === "on" || setting === "yes") {
+    // Environment override is useful for one-off checks and CI smoke tests.
+  } else if (!readConfig().autoUpdateCheck) {
+    return true;
+  }
   if (!process.stderr.isTTY) return true;
   if (args.some((arg) => typeof arg === "object" && arg !== null && (arg as CommonOptions).json)) return true;
 
   const command = cli.args[0];
   if (!command) return true;
   if (command === "update") return true;
+  if (command === "config") return true;
   if (command === "daemon" || command === "daemons" || command === "d") return true;
   return false;
 }
@@ -787,7 +820,22 @@ const rootCommands = {
       console.log("Remounted all layer and user mounts.");
     });
   },
-} satisfies Record<"status" | "remount", CommandHandler>;
+  config: async (ctx) => {
+    ensureStateDir();
+    const config = readConfig();
+    const data = {
+      path: configPath(),
+      exists: fs.existsSync(configPath()),
+      config,
+      defaults: defaultConfig(),
+    };
+    outputData(ctx, data, (value) => {
+      console.log(`Config path: ${value.path}`);
+      console.log(`Config file exists: ${value.exists ? "yes" : "no"}`);
+      console.log(`autoUpdateCheck: ${value.config.autoUpdateCheck ? "on" : "off"}`);
+    });
+  },
+} satisfies Record<"status" | "remount" | "config", CommandHandler>;
 
 const entrypointCommands = {
   list: async (ctx) => {
@@ -1231,6 +1279,12 @@ cli.command("remount", "Remount all layers and user mounts").action(
   }),
 );
 
+cli.command("config", "Show Spaces config and config file path").action(
+  withFriendlyErrors(async (opts: CommonOptions) => {
+    await rootCommands.config(buildCtx([], opts));
+  }),
+);
+
 cli
   .command("update [version]", "Install or check for updates from GitHub Releases")
   .option("--check", "Only check whether an update is available")
@@ -1298,6 +1352,7 @@ cli.example("layer create --entrypoint ep_123 --name feat-login --parent lyr_123
 cli.example("mount create dev ~/worktree --entrypoint ep_123 --layer lyr_456");
 cli.example("mount delete mnt_123 --force");
 cli.example("daemon start");
+cli.example("config");
 cli.example("update --check");
 
 cli.on("command:*", () => {

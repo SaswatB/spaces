@@ -8,11 +8,25 @@ spaces update
 spaces update 0.1.0
 ```
 
-The CLI also performs a quiet update check at most once every 24 hours after successful interactive commands. It skips JSON output, non-interactive shells, `spaces update`, and daemon lifecycle commands. Network failures are ignored.
+The CLI can perform a quiet update check at most once every 24 hours after successful interactive commands. It skips JSON output, non-interactive shells, `spaces update`, `spaces config`, and daemon lifecycle commands. Network failures are ignored.
 
-To disable automatic checks:
+Automatic update notices are off by default. The installer asks whether to enable them, and non-interactive installs leave them off. View the config path and current setting:
 
 ```bash
+spaces config
+```
+
+To preselect the installer answer:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/SaswatB/spaces/main/scripts/install.sh | SPACES_AUTO_UPDATE_CHECK=1 bash
+curl -fsSL https://raw.githubusercontent.com/SaswatB/spaces/main/scripts/install.sh | SPACES_AUTO_UPDATE_CHECK=0 bash
+```
+
+Environment variables can still override the persisted config for one command:
+
+```bash
+SPACES_UPDATE_CHECK=1 spaces status
 SPACES_UPDATE_CHECK=0 spaces status
 ```
 

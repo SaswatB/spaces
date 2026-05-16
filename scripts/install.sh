@@ -9,6 +9,66 @@ API_BASE_URL="${SPACES_GITHUB_API_BASE_URL:-https://api.github.com}"
 BASE_URL="${SPACES_RELEASE_BASE_URL:-https://github.com/$REPO/releases/download}"
 GITHUB_TOKEN_VALUE="${SPACES_GITHUB_TOKEN:-${GITHUB_TOKEN:-}}"
 
+spaces_state_dir() {
+  if [ "${SPACES_STATE_DIR:-}" != "" ]; then
+    printf "%s\n" "$SPACES_STATE_DIR"
+    return
+  fi
+  case "$(uname -s)" in
+    Darwin) printf "%s\n" "$HOME/Library/Application Support/Spaces" ;;
+    *) printf "%s\n" "${XDG_STATE_HOME:-$HOME/.local/state}/spaces" ;;
+  esac
+}
+
+write_auto_update_config() {
+  enabled="$1"
+  state_dir="$(spaces_state_dir)"
+  mkdir -p "$state_dir"
+  cat > "$state_dir/config.json" <<EOF
+{
+  "autoUpdateCheck": $enabled
+}
+EOF
+}
+
+configure_auto_update_check() {
+  if [ "${SPACES_AUTO_UPDATE_CHECK:-}" != "" ]; then
+    case "$(printf "%s" "$SPACES_AUTO_UPDATE_CHECK" | tr '[:upper:]' '[:lower:]')" in
+      1|true|on|yes)
+        write_auto_update_config true
+        echo "Daily update notices enabled."
+        return
+        ;;
+      0|false|off|no)
+        write_auto_update_config false
+        echo "Daily update notices disabled."
+        return
+        ;;
+      *)
+        echo "Ignoring invalid SPACES_AUTO_UPDATE_CHECK=$SPACES_AUTO_UPDATE_CHECK"
+        ;;
+    esac
+  fi
+
+  if [ ! -t 0 ]; then
+    echo "Daily update notices are off by default."
+    return
+  fi
+
+  printf "Enable daily update notices when the Spaces CLI is used? [y/N] "
+  read -r answer
+  case "$(printf "%s" "$answer" | tr '[:upper:]' '[:lower:]')" in
+    y|yes)
+      write_auto_update_config true
+      echo "Daily update notices enabled."
+      ;;
+    *)
+      write_auto_update_config false
+      echo "Daily update notices disabled."
+      ;;
+  esac
+}
+
 if [ "$GITHUB_TOKEN_VALUE" = "" ] && command -v gh >/dev/null 2>&1; then
   GITHUB_TOKEN_VALUE="$(gh auth token 2>/dev/null || true)"
 fi
@@ -140,3 +200,4 @@ fi
 
 echo "Installed Spaces $VERSION to $BIN_DIR"
 echo "Make sure $BIN_DIR is on your PATH."
+configure_auto_update_check
