@@ -9,4 +9,4 @@ rm -f "$BIN_DIR/spaces-uninstall"
 rm -rf "$BIN_DIR/spacesd-runtime"
 rm -rf "$BIN_DIR/spacesd-lib"
 
-echo "Removed spaces and spacesd from $BIN_DIR"
+echo "Removed Spaces from $BIN_DIR"
