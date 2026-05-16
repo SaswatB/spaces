@@ -119,8 +119,14 @@ if [ ! -f "$TMP_DIR/spacesd" ]; then
   exit 1
 fi
 
+if [ ! -f "$TMP_DIR/spaces-uninstall" ]; then
+  echo "spaces-uninstall not found in archive"
+  exit 1
+fi
+
 install -m 0755 "$TMP_DIR/spaces" "$BIN_DIR/spaces"
 install -m 0755 "$TMP_DIR/spacesd" "$BIN_DIR/spacesd"
+install -m 0755 "$TMP_DIR/spaces-uninstall" "$BIN_DIR/spaces-uninstall"
 
 if [ -d "$TMP_DIR/spacesd-runtime" ]; then
   rm -rf "$BIN_DIR/spacesd-runtime"

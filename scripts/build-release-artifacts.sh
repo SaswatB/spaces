@@ -79,6 +79,8 @@ echo "Building CLI single-file binary (bun)..."
 bun build "$ROOT_DIR/packages/web/bin/spaces.ts" --compile --outfile "$WORK_DIR/spaces"
 chmod +x "$WORK_DIR/spaces"
 
+install -m 0755 "$ROOT_DIR/scripts/uninstall.sh" "$WORK_DIR/spaces-uninstall"
+
 echo "Building daemon distribution (gradle installDist)..."
 gradle -p "$ROOT_DIR/packages/daemon-jvm" installDist
 
@@ -119,7 +121,7 @@ chmod +x "$WORK_DIR/spacesd"
 RELEASE_ARCHIVE="$OUT_DIR/spaces-${VERSION}-${SUFFIX}.tar.gz"
 
 echo "Packing $RELEASE_ARCHIVE"
-tar -C "$WORK_DIR" -czf "$RELEASE_ARCHIVE" spaces spacesd spacesd-runtime spacesd-lib
+tar -C "$WORK_DIR" -czf "$RELEASE_ARCHIVE" spaces spaces-uninstall spacesd spacesd-runtime spacesd-lib
 
 CHECKSUM_FILE="$OUT_DIR/SHA256SUMS-${SUFFIX}"
 echo "Writing $CHECKSUM_FILE"

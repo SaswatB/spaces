@@ -18,6 +18,12 @@ Install the latest macOS release:
 curl -fsSL https://raw.githubusercontent.com/SaswatB/spaces/main/scripts/install.sh | bash
 ```
 
+Uninstall:
+
+```bash
+spaces-uninstall
+```
+
 ```bash
 pnpm install
 pnpm typecheck
@@ -50,7 +56,7 @@ pnpm uninstall:release
 - `pnpm release:artifacts`: build a local release tarball for the current platform.
 - `pnpm release:tag [major|minor|patch]`: bump versions, commit `Release vX.Y.Z`, create an annotated `vX.Y.Z` tag, and push the branch plus tag. Default bump is `minor`.
 - `pnpm install:release`: install the latest published release, or `SPACES_VERSION=<version> pnpm install:release`.
-- `pnpm uninstall:release`: remove installed `spaces`, `spacesd`, and bundled daemon runtime files.
+- `pnpm uninstall:release`: remove installed `spaces`, `spaces-uninstall`, `spacesd`, and bundled daemon runtime files.
 
 Pushing a `v*` tag triggers the GitHub Actions release workflow, which builds macOS artifacts and publishes them to a GitHub Release.
 

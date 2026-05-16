@@ -58,3 +58,9 @@ The install script can be used directly from GitHub:
 ```bash
 curl -fsSL https://raw.githubusercontent.com/SaswatB/spaces/main/scripts/install.sh | bash
 ```
+
+Installed releases include `spaces-uninstall` next to `spaces`:
+
+```bash
+spaces-uninstall
+```

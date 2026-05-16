@@ -426,10 +426,12 @@ async function updateSpaces(version: string | undefined, opts: UpdateOptions): P
     extractTarball(releaseArchive, extractDir);
 
     const spacesPath = path.join(extractDir, "spaces");
+    const uninstallPath = path.join(extractDir, "spaces-uninstall");
     const spacesdPath = path.join(extractDir, "spacesd");
     const runtimePath = path.join(extractDir, "spacesd-runtime");
     const libPath = path.join(extractDir, "spacesd-lib");
     if (!fs.existsSync(spacesPath)) throw new Error("Downloaded archive did not contain spaces");
+    if (!fs.existsSync(uninstallPath)) throw new Error("Downloaded archive did not contain spaces-uninstall");
     if (!fs.existsSync(spacesdPath)) throw new Error("Downloaded archive did not contain spacesd");
     if (!fs.existsSync(runtimePath)) throw new Error("Downloaded archive did not contain spacesd-runtime");
     if (!fs.existsSync(libPath)) throw new Error("Downloaded archive did not contain spacesd-lib");
@@ -445,6 +447,7 @@ async function updateSpaces(version: string | undefined, opts: UpdateOptions): P
 
     fs.mkdirSync(binDir, { recursive: true });
     installFile(spacesPath, path.join(binDir, "spaces"));
+    installFile(uninstallPath, path.join(binDir, "spaces-uninstall"));
     installFile(spacesdPath, path.join(binDir, "spacesd"));
     replaceDirectory(runtimePath, path.join(binDir, "spacesd-runtime"));
     replaceDirectory(libPath, path.join(binDir, "spacesd-lib"));
